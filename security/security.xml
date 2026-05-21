@@ -1,0 +1,16 @@
+<odoo>
+    <record id="group_purchase_request_user" model="res.groups">
+        <field name="name">Solicitud de compra</field>
+        <field name="category_id" ref="base.module_category_inventory"/>
+    </record>
+
+    <record id="group_operations_manager" model="res.groups">
+        <field name="name">Gerente de operaciones</field>
+        <field name="category_id" ref="base.module_category_inventory"/>
+    </record>
+
+    <record id="group_warehouse_lead" model="res.groups">
+        <field name="name">Jefe de bodega</field>
+        <field name="category_id" ref="base.module_category_inventory"/>
+    </record>
+</odoo>

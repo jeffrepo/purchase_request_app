@@ -1,0 +1,12 @@
+<odoo>
+    <record id="purchase_order_form_inherit_purchase_request" model="ir.ui.view">
+        <field name="name">purchase.order.form.purchase.request</field>
+        <field name="model">purchase.order</field>
+        <field name="inherit_id" ref="purchase.purchase_order_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//sheet//group" position="inside">
+                <field name="purchase_request_id" readonly="1"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>

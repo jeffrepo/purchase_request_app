@@ -1,0 +1,68 @@
+<odoo>
+    <record id="view_purchase_request_tree" model="ir.ui.view">
+        <field name="name">purchase.request.tree</field>
+        <field name="model">purchase.request</field>
+        <field name="arch" type="xml">
+            <list>
+                <field name="name"/>
+                <field name="date"/>
+                <field name="request_type"/>
+                <field name="location_id"/>
+                <field name="state"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_purchase_request_form" model="ir.ui.view">
+        <field name="name">purchase.request.form</field>
+        <field name="model">purchase.request</field>
+        <field name="arch" type="xml">
+            <form string="Solicitud de Compra">
+                <header>
+                    <button name="action_request" type="object" string="Solicitar" invisible="state != 'draft'"/>
+                    <button name="action_confirm" type="object" string="Confirmar" invisible="state != 'requested'" groups="purchase_request_app.group_operations_manager"/>
+                    <button name="action_generate_purchase_orders" type="object" string="Generar orden de compra" invisible="state != 'confirmed' or request_type != 'purchase'" groups="purchase_request_app.group_warehouse_lead"/>
+                    <button name="action_generate_transfers" type="object" string="Generar traslado" invisible="state != 'confirmed' or request_type != 'transfer'" groups="purchase_request_app.group_warehouse_lead"/>
+                    <button name="action_close" type="object" string="Cerrar" invisible="state in ('closed','cancelled')" groups="purchase_request_app.group_operations_manager"/>
+                    <button name="action_cancel" type="object" string="Cancelar" invisible="state in ('closed','cancelled')"/>
+                    <button name="action_reset_to_draft" type="object" string="Reiniciar" invisible="state != 'cancelled'"/>
+                    <field name="state" widget="statusbar" statusbar_visible="draft,requested,confirmed,closed,cancelled"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="name" readonly="1"/>
+                            <field name="date"/>
+                            <field name="request_hour" widget="float_time"/>
+                        </group>
+                        <group>
+                            <field name="request_type"/>
+                            <field name="location_id"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Productos">
+                            <field name="line_ids">
+                                <list editable="bottom">
+                                    <field name="selected_for_action"/>
+                                    <field name="product_id"/>
+                                    <field name="qty_available_location" readonly="1"/>
+                                    <field name="qty_requested"/>
+                                    <field name="vendor_id" invisible="parent.request_type != 'purchase'"/>
+                                    <field name="source_location_id" invisible="parent.request_type != 'transfer'"/>
+                                </list>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+                <chatter/>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_purchase_request" model="ir.actions.act_window">
+        <field name="name">Solicitudes de Compra</field>
+        <field name="res_model">purchase.request</field>
+        <field name="view_mode">list,form</field>
+    </record>
+</odoo>

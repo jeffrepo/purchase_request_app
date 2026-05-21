@@ -1,0 +1,4 @@
+<odoo>
+    <menuitem id="menu_purchase_request_root" name="Solicitud de Compra" sequence="10" groups="purchase_request_app.group_purchase_request_user"/>
+    <menuitem id="menu_purchase_request" name="Solicitudes" parent="menu_purchase_request_root" action="action_purchase_request"/>
+</odoo>
