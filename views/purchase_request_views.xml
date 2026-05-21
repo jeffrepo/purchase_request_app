@@ -5,7 +5,7 @@
         <field name="arch" type="xml">
             <list>
                 <field name="name"/>
-                <field name="date"/>
+                <field name="request_datetime"/>
                 <field name="request_type"/>
                 <field name="location_id"/>
                 <field name="state"/>
@@ -32,8 +32,7 @@
                     <group>
                         <group>
                             <field name="name" readonly="1"/>
-                            <field name="date"/>
-                            <field name="request_hour" widget="float_time"/>
+                            <field name="request_datetime"/>
                         </group>
                         <group>
                             <field name="request_type"/>

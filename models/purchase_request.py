@@ -10,9 +10,8 @@ class PurchaseRequest(models.Model):
     _inherit = ["mail.thread", "mail.activity.mixin"]
     _order = "id desc"
 
-    name = fields.Char(default=lambda self: _("Nuevo"), copy=False, tracking=True)
-    date = fields.Date(default=fields.Date.context_today, required=True)
-    request_hour = fields.Float(string="Hora solicitud")
+    name = fields.Char(default="/", copy=False, tracking=True, readonly=True)
+    request_datetime = fields.Datetime(string="Fecha y hora", default=fields.Datetime.now, required=True)
     request_type = fields.Selection([
         ("purchase", "Compra"),
         ("transfer", "Traslado"),
@@ -32,17 +31,22 @@ class PurchaseRequest(models.Model):
     @api.model_create_multi
     def create(self, vals_list):
         for vals in vals_list:
-            if vals.get("name", _("Nuevo")) == _("Nuevo"):
-                vals["name"] = self.env["ir.sequence"].next_by_code("purchase.request") or _("Nuevo")
+            if not vals.get("name") or vals.get("name") == "/":
+                vals["name"] = self.env["ir.sequence"].next_by_code("purchase.request") or "/"
         return super().create(vals_list)
 
     def _notify_group(self, xmlid, message):
         group = self.env.ref(xmlid, raise_if_not_found=False)
         if not group:
             return
-        users = group.users
-        for user in users:
-            self.message_post(body=message, partner_ids=[user.partner_id.id])
+        partners = group.users.mapped("partner_id")
+        if not partners:
+            return
+        self.message_notify(
+            partner_ids=partners.ids,
+            body=message,
+            subject=_("Notificación de solicitud de compra"),
+        )
 
     def action_request(self):
         for rec in self:
