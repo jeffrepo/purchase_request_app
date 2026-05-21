@@ -21,7 +21,7 @@
                 <header>
                     <button name="action_request" type="object" string="Solicitar" invisible="state != 'draft'"/>
                     <button name="action_confirm" type="object" string="Confirmar" invisible="state != 'requested'" groups="purchase_request_app.group_operations_manager"/>
-                    <button name="action_generate_purchase_orders" type="object" string="Generar orden de compra" invisible="state != 'confirmed' or request_type != 'purchase'" groups="purchase_request_app.group_warehouse_lead"/>
+                    <button name="action_generate_purchase_orders" type="object" string="Generar solicitud de compra" invisible="state != 'confirmed' or request_type != 'purchase'" groups="purchase_request_app.group_warehouse_lead"/>
                     <button name="action_generate_transfers" type="object" string="Generar traslado" invisible="state != 'confirmed' or request_type != 'transfer'" groups="purchase_request_app.group_warehouse_lead"/>
                     <button name="action_close" type="object" string="Cerrar" invisible="state in ('closed','cancelled')" groups="purchase_request_app.group_operations_manager"/>
                     <button name="action_cancel" type="object" string="Cancelar" invisible="state in ('closed','cancelled')"/>

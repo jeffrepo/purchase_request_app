@@ -10,7 +10,7 @@ class PurchaseRequest(models.Model):
     _inherit = ["mail.thread", "mail.activity.mixin"]
     _order = "id desc"
 
-    name = fields.Char(default="/", copy=False, tracking=True, readonly=True)
+    name = fields.Char(default="/", copy=False, tracking=True, readonly=True, required=True)
     request_datetime = fields.Datetime(string="Fecha y hora", default=fields.Datetime.now, required=True)
     request_type = fields.Selection([
         ("purchase", "Compra"),
@@ -31,7 +31,7 @@ class PurchaseRequest(models.Model):
     @api.model_create_multi
     def create(self, vals_list):
         for vals in vals_list:
-            if not vals.get("name") or vals.get("name") == "/":
+            if vals.get("name") in (False, "/", "Nuevo", _("Nuevo")):
                 vals["name"] = self.env["ir.sequence"].next_by_code("purchase.request") or "/"
         return super().create(vals_list)
 
