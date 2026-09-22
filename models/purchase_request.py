@@ -1,7 +1,13 @@
 from collections import defaultdict
 
 from odoo import _, api, fields, models
-from odoo.exceptions import UserError
+from odoo.exceptions import UserError, ValidationError
+
+
+STOCK_LOCATION_DOMAIN = [
+    ("usage", "=", "internal"),
+    ("complete_name", "=ilike", "%/stock"),
+]
 
 
 class PurchaseRequest(models.Model):
@@ -9,6 +15,7 @@ class PurchaseRequest(models.Model):
     _description = "Solicitud de Compra"
     _inherit = ["mail.thread", "mail.activity.mixin"]
     _order = "id desc"
+    _check_company_auto = True
 
     name = fields.Char(default="/", copy=False, tracking=True, readonly=True, required=True)
     request_datetime = fields.Datetime(string="Fecha y hora", default=fields.Datetime.now, required=True)
@@ -16,7 +23,18 @@ class PurchaseRequest(models.Model):
         ("purchase", "Compra"),
         ("transfer", "Traslado"),
     ], default="purchase", required=True, tracking=True)
-    location_id = fields.Many2one("stock.location", string="Ubicación destino", required=True)
+    company_id = fields.Many2one(
+        "res.company", string="Compañía", required=True,
+        default=lambda self: self.env.company,
+    )
+    location_id = fields.Many2one(
+        "stock.location", string="Ubicación destino", required=True,
+        domain=STOCK_LOCATION_DOMAIN, check_company=True,
+    )
+    category_id = fields.Many2one(
+        "product.category", string="Categoría de productos",
+        help="Permite productos de esta categoría y de todas sus subcategorías.",
+    )
     line_ids = fields.One2many("purchase.request.line", "request_id", string="Productos")
     state = fields.Selection([
         ("draft", "Borrador"),
@@ -31,9 +49,36 @@ class PurchaseRequest(models.Model):
     @api.model_create_multi
     def create(self, vals_list):
         for vals in vals_list:
-            if vals.get("name") in (False, "/", "Nuevo", _("Nuevo")):
-                vals["name"] = self.env["ir.sequence"].next_by_code("purchase.request") or "/"
+            if not vals.get("name") or vals["name"] in ("/", "Nuevo", _("Nuevo")):
+                company = self.env["res.company"].browse(
+                    vals.get("company_id") or self.default_get(["company_id"])["company_id"]
+                )
+                vals["name"] = self.with_company(company)._next_request_name()
         return super().create(vals_list)
+
+    @api.model
+    def _next_request_name(self):
+        name = self.env["ir.sequence"].next_by_code("purchase.request")
+        if not name:
+            raise UserError(_("Configura una secuencia activa con el código purchase.request."))
+        return name
+
+    @api.constrains("category_id", "line_ids")
+    def _check_product_category(self):
+        for request in self.filtered("category_id"):
+            categories = self.env["product.category"].search([
+                ("id", "child_of", request.category_id.id),
+            ])
+            invalid_lines = request.line_ids.filtered(
+                lambda line: line.product_id and line.product_id.categ_id not in categories
+            )
+            if invalid_lines:
+                raise ValidationError(_(
+                    "Los productos deben pertenecer a la categoría %(category)s o a sus "
+                    "subcategorías. Revisa: %(products)s.",
+                    category=request.category_id.display_name,
+                    products=", ".join(invalid_lines.product_id.mapped("display_name")),
+                ))
 
     def _notify_group(self, xmlid, message):
         group = self.env.ref(xmlid, raise_if_not_found=False)
@@ -77,21 +122,54 @@ class PurchaseRequest(models.Model):
 
     def action_generate_purchase_orders(self):
         self.ensure_one()
+        self = self.with_company(self.company_id)
         if self.request_type != "purchase":
             raise UserError(_("Solo aplica para solicitudes de tipo compra."))
 
-        grouped = defaultdict(list)
-        for line in self.line_ids.filtered(lambda l: l.selected_for_action and l.qty_requested > 0):
-            grouped[line.vendor_id.id or False].append(line)
-
-        if not grouped:
+        lines = self.line_ids.filtered(lambda l: l.selected_for_action and l.qty_requested > 0)
+        if not lines:
             raise UserError(_("Selecciona líneas con cantidad solicitada."))
+        if any(not line.vendor_id for line in lines):
+            raise UserError(_("Indica un proveedor en cada línea seleccionada."))
+        self._check_product_category()
 
-        po_model = self.env["purchase.order"]
-        created_pos = self.env["purchase.order"]
-        for vendor_id, lines in grouped.items():
+        company = self.company_id
+        ab_category = company.purchase_request_ab_category_id
+        if not ab_category:
+            raise UserError(_("Configura la categoría de A&B en Ajustes > Compras > Solicitudes de compra."))
+        ab_categories = self.env["product.category"].search([("id", "child_of", ab_category.id)])
+
+        # A purchase order has one operation type, even when the vendor is shared.
+        grouped = defaultdict(list)
+        for line in lines:
+            is_ab = line.product_id.categ_id in ab_categories
+            picking_type = (
+                company.purchase_request_ab_picking_type_id if is_ab
+                else company.purchase_request_supplies_picking_type_id
+            )
+            if not picking_type:
+                raise UserError(_(
+                    "Configura el tipo de operación para %s en Ajustes > Compras > Solicitudes de compra.",
+                    "A&B" if is_ab else "insumos",
+                ))
+            if (not picking_type.active or picking_type.code != "incoming"
+                    or picking_type.company_id != company
+                    or picking_type.default_location_dest_id.usage != "internal"
+                    or not picking_type.default_location_dest_id.active):
+                raise UserError(_(
+                    "El tipo de operación %(operation)s debe ser una recepción activa de "
+                    "%(company)s con una ubicación destino interna activa.",
+                    operation=picking_type.display_name, company=company.display_name,
+                ))
+            grouped[(line.vendor_id.id, picking_type.id)].append(line)
+
+        po_model = self.env["purchase.order"].with_company(company)
+        created_pos = po_model.browse()
+        for (vendor_id, picking_type_id), lines in grouped.items():
             vals = {
                 "partner_id": vendor_id,
+                "company_id": company.id,
+                "picking_type_id": picking_type_id,
                 "origin": self.name,
                 "purchase_request_id": self.id,
                 "order_line": [],
@@ -117,6 +195,7 @@ class PurchaseRequest(models.Model):
 
     def action_generate_transfers(self):
         self.ensure_one()
+        self = self.with_company(self.company_id)
         if self.request_type != "transfer":
             raise UserError(_("Solo aplica para solicitudes de tipo traslado."))
 
@@ -127,7 +206,9 @@ class PurchaseRequest(models.Model):
         if not grouped:
             raise UserError(_("Selecciona líneas con ubicación origen y cantidad."))
 
-        picking_type = self.env["stock.picking.type"].search([("code", "=", "internal")], limit=1)
+        picking_type = self.env["stock.picking.type"].search([
+            ("code", "=", "internal"), ("company_id", "=", self.company_id.id),
+        ], limit=1)
         if not picking_type:
             raise UserError(_("No hay tipo de operación interna configurado."))
 
@@ -135,6 +216,7 @@ class PurchaseRequest(models.Model):
         for source_loc_id, lines in grouped.items():
             picking_vals = {
                 "picking_type_id": picking_type.id,
+                "company_id": self.company_id.id,
                 "location_id": source_loc_id,
                 "location_dest_id": self.location_id.id,
                 "origin": self.name,
@@ -164,15 +246,31 @@ class PurchaseRequest(models.Model):
 class PurchaseRequestLine(models.Model):
     _name = "purchase.request.line"
     _description = "Línea de Solicitud"
+    _check_company_auto = True
 
     request_id = fields.Many2one("purchase.request", required=True, ondelete="cascade")
-    product_id = fields.Many2one("product.product", required=True)
+    company_id = fields.Many2one(related="request_id.company_id", store=True)
+    category_id = fields.Many2one(related="request_id.category_id")
+    product_id = fields.Many2one(
+        "product.product", required=True, check_company=True,
+        domain="[('categ_id', 'child_of', category_id)] if category_id else []",
+    )
     product_uom_id = fields.Many2one(related="product_id.uom_po_id", store=True)
     qty_available_location = fields.Float(string="Existencia", compute="_compute_qty_available_location")
     qty_requested = fields.Float(string="Cantidad a solicitar", required=True, default=1.0)
-    vendor_id = fields.Many2one("res.partner", string="Proveedor", domain=[("supplier_rank", ">", 0)])
-    source_location_id = fields.Many2one("stock.location", string="Ubicación origen")
+    vendor_id = fields.Many2one(
+        "res.partner", string="Proveedor", domain=[("supplier_rank", ">", 0)],
+        check_company=True,
+    )
+    source_location_id = fields.Many2one(
+        "stock.location", string="Ubicación origen",
+        domain=STOCK_LOCATION_DOMAIN, check_company=True,
+    )
     selected_for_action = fields.Boolean(string="Seleccionar")
+
+    @api.constrains("product_id", "request_id")
+    def _check_product_category(self):
+        self.request_id._check_product_category()
 
     @api.depends("product_id", "request_id.location_id")
     def _compute_qty_available_location(self):

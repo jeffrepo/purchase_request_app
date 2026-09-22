@@ -8,6 +8,7 @@
                 <field name="request_datetime"/>
                 <field name="request_type"/>
                 <field name="location_id"/>
+                <field name="category_id" optional="show"/>
                 <field name="state"/>
             </list>
         </field>
@@ -33,10 +34,12 @@
                         <group>
                             <field name="name" readonly="1"/>
                             <field name="request_datetime"/>
+                            <field name="company_id" groups="base.group_multi_company"/>
                         </group>
                         <group>
                             <field name="request_type"/>
-                            <field name="location_id"/>
+                            <field name="location_id" options="{'no_create': True}"/>
+                            <field name="category_id" options="{'no_create': True}"/>
                         </group>
                     </group>
                     <notebook>
@@ -44,11 +47,15 @@
                             <field name="line_ids">
                                 <list editable="bottom">
                                     <field name="selected_for_action"/>
-                                    <field name="product_id"/>
+                                    <field name="company_id" column_invisible="True"/>
+                                    <field name="category_id" column_invisible="True"/>
+                                    <field name="product_id"
+                                           domain="[('categ_id', 'child_of', parent.category_id)] if parent.category_id else []"
+                                           options="{'no_create': True}"/>
                                     <field name="qty_available_location" readonly="1"/>
                                     <field name="qty_requested"/>
                                     <field name="vendor_id" invisible="parent.request_type != 'purchase'"/>
-                                    <field name="source_location_id" invisible="parent.request_type != 'transfer'"/>
+                                    <field name="source_location_id" invisible="parent.request_type != 'transfer'" options="{'no_create': True}"/>
                                 </list>
                             </field>
                         </page>

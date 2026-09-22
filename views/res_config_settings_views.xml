@@ -1,0 +1,25 @@
+<odoo>
+    <record id="res_config_settings_view_form_purchase_request" model="ir.ui.view">
+        <field name="name">res.config.settings.purchase.request</field>
+        <field name="model">res.config.settings</field>
+        <field name="inherit_id" ref="purchase.res_config_settings_view_form_purchase"/>
+        <field name="arch" type="xml">
+            <xpath expr="//app[@name='purchase']" position="inside">
+                <block title="Solicitudes de compra" name="purchase_request_settings">
+                    <setting id="purchase_request_ab_category" company_dependent="1"
+                             help="Los productos de esta categoría y de todas sus subcategorías se consideran A&amp;B.">
+                        <field name="purchase_request_ab_category_id" options="{'no_create': True}"/>
+                    </setting>
+                    <setting id="purchase_request_ab_operation" company_dependent="1"
+                             help="Selecciona la recepción cuya ubicación destino corresponde a A&amp;B/Stock.">
+                        <field name="purchase_request_ab_picking_type_id" options="{'no_create': True}"/>
+                    </setting>
+                    <setting id="purchase_request_supplies_operation" company_dependent="1"
+                             help="Recepción para productos que no pertenecen a A&amp;B; utiliza la ubicación destino configurada en este tipo de operación.">
+                        <field name="purchase_request_supplies_picking_type_id" options="{'no_create': True}"/>
+                    </setting>
+                </block>
+            </xpath>
+        </field>
+    </record>
+</odoo>
