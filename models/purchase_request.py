@@ -25,8 +25,9 @@ class PurchaseRequest(models.Model):
         default=lambda self: self.env.company,
     )
     location_id = fields.Many2one(
-        "stock.location", string="Ubicación destino", required=True,
+        "stock.location", string="Ubicación destino",
         domain=STOCK_LOCATION_DOMAIN, check_company=True,
+        help="Obligatoria al confirmar solicitudes con traslados y al generarlos. Opcional para compras.",
     )
     category_id = fields.Many2one(
         "product.category", string="Categoría de productos",
@@ -106,12 +107,22 @@ class PurchaseRequest(models.Model):
             )
 
     def action_confirm(self):
+        self._check_transfer_destination()
         for rec in self:
             rec.state = "confirmed"
             rec._notify_group(
                 "purchase_request_app.group_warehouse_lead",
                 _("Solicitud confirmada (%s). Revisa el tipo de operación de cada línea.") % rec.name,
             )
+
+    def _check_transfer_destination(self):
+        for request in self:
+            if not request.location_id and any(line.request_type == "transfer" for line in request.line_ids):
+                raise UserError(_(
+                    "La solicitud %s contiene líneas de traslado. Completa el campo Ubicación destino "
+                    "antes de confirmar o generar los traslados.",
+                    request.name,
+                ))
 
     def action_close(self):
         self.write({"state": "closed"})
@@ -230,6 +241,7 @@ class PurchaseRequest(models.Model):
     def action_generate_transfers(self):
         self.ensure_one()
         self = self.with_company(self.company_id)
+        self._check_transfer_destination()
         lines = self.line_ids.filtered(
             lambda line: line.request_type == "transfer" and line.selected_for_action and line.qty_requested > 0
         )

@@ -237,6 +237,54 @@ class TestPurchaseRequest(TransactionCase):
         self.assertEqual(request.picking_ids.location_dest_id, self.supplies_warehouse.lot_stock_id)
         self.assertEqual(request.picking_ids.picking_type_id, self.ab_warehouse.int_type_id)
 
+    def test_purchase_only_form_can_confirm_and_buy_without_destination(self):
+        with Form(self.env["purchase.request"]) as form:
+            with form.line_ids.new() as line:
+                line.product_id = self.ab_product
+                line.vendor_id = self.vendor
+                line.selected_for_action = True
+        request = form.record
+        self.assertFalse(request.location_id)
+        self.assertEqual(request.line_ids.qty_available_location, 0)
+        request.action_request()
+        request.action_confirm()
+        self.assertEqual(request.state, "confirmed")
+        request.action_generate_purchase_orders()
+        self.assertEqual(request.purchase_order_ids.picking_type_id, self.ab_warehouse.in_type_id)
+
+    def test_mixed_request_can_save_without_destination_but_cannot_confirm_or_transfer(self):
+        request = self._request(location_id=False, line_ids=[
+            self._line(self.ab_product),
+            self._line(self.supplies_product, request_type="transfer",
+                       source_location_id=self.ab_warehouse.lot_stock_id.id),
+        ])
+        request.action_request()
+        with self.assertRaisesRegex(UserError, "Ubicación destino"):
+            request.action_confirm()
+        self.assertEqual(request.state, "requested")
+        with self.assertRaisesRegex(UserError, "Ubicación destino"):
+            request.action_generate_transfers()
+        self.assertFalse(request.picking_ids)
+        request.location_id = self.supplies_warehouse.lot_stock_id
+        request.action_confirm()
+        request.action_generate_transfers()
+        self.assertEqual(request.picking_ids.location_dest_id, request.location_id)
+        request.location_id = False
+        with self.assertRaisesRegex(UserError, "Ubicación destino"):
+            request.action_generate_transfers()
+        self.assertEqual(len(request.picking_ids), 1)
+
+    def test_batch_confirmation_checks_even_unselected_transfer_lines_before_changing_states(self):
+        purchase = self._request(location_id=False, state="requested", line_ids=[self._line(self.ab_product)])
+        transfer = self._request(location_id=False, state="requested", line_ids=[self._line(
+            self.ab_product, request_type="transfer", selected_for_action=False, qty_requested=0,
+            source_location_id=self.ab_warehouse.lot_stock_id.id,
+        )])
+        with self.assertRaisesRegex(UserError, "Ubicación destino"):
+            (purchase | transfer).action_confirm()
+        self.assertEqual(purchase.state, "requested")
+        self.assertEqual(transfer.state, "requested")
+
     def test_mixed_request_generates_and_displays_each_operation(self):
         request = self._request(state="confirmed", line_ids=[
             self._line(self.ab_product),
