@@ -18,12 +18,4 @@ class PurchaseOrder(models.Model):
         return res
 
     def _try_close_request(self):
-        for order in self.filtered("purchase_request_id"):
-            request = order.purchase_request_id
-            if request.request_type != "purchase" or request.state in ("closed", "cancelled"):
-                continue
-            all_products = request.line_ids.mapped("product_id")
-            purchased_lines = request.purchase_order_ids.filtered(lambda p: p.state in ("purchase", "done")).mapped("order_line")
-            purchased_products = purchased_lines.mapped("product_id")
-            if all(p in purchased_products for p in all_products):
-                request.state = "closed"
+        self.purchase_request_id._try_close_request()

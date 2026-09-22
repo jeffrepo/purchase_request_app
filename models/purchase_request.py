@@ -2,6 +2,7 @@ from collections import defaultdict
 
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError, ValidationError
+from odoo.tools.float_utils import float_compare
 
 
 STOCK_LOCATION_DOMAIN = [
@@ -19,10 +20,6 @@ class PurchaseRequest(models.Model):
 
     name = fields.Char(default="/", copy=False, tracking=True, readonly=True, required=True)
     request_datetime = fields.Datetime(string="Fecha y hora", default=fields.Datetime.now, required=True)
-    request_type = fields.Selection([
-        ("purchase", "Compra"),
-        ("transfer", "Traslado"),
-    ], default="purchase", required=True, tracking=True)
     company_id = fields.Many2one(
         "res.company", string="Compañía", required=True,
         default=lambda self: self.env.company,
@@ -43,8 +40,13 @@ class PurchaseRequest(models.Model):
         ("closed", "Cerrado"),
         ("cancelled", "Cancelado"),
     ], default="draft", tracking=True)
-    purchase_order_ids = fields.One2many("purchase.order", "purchase_request_id")
-    picking_ids = fields.One2many("stock.picking", "purchase_request_id")
+    purchase_order_ids = fields.One2many(
+        "purchase.order", "purchase_request_id", string="Compras generadas", readonly=True,
+    )
+    picking_ids = fields.One2many(
+        "stock.picking", "purchase_request_id", string="Traslados generados", readonly=True,
+        domain=[("picking_type_id.code", "=", "internal")],
+    )
 
     @api.model_create_multi
     def create(self, vals_list):
@@ -108,7 +110,7 @@ class PurchaseRequest(models.Model):
             rec.state = "confirmed"
             rec._notify_group(
                 "purchase_request_app.group_warehouse_lead",
-                _("Solicitud confirmada (%s). Tipo: %s") % (rec.name, rec.request_type),
+                _("Solicitud confirmada (%s). Revisa el tipo de operación de cada línea.") % rec.name,
             )
 
     def action_close(self):
@@ -120,15 +122,47 @@ class PurchaseRequest(models.Model):
     def action_reset_to_draft(self):
         self.write({"state": "draft"})
 
+    def _try_close_request(self):
+        """Purchase confirmations and completed transfers fulfil different demand."""
+        # Confirming a purchase or completing a transfer must not require read
+        # access to the other operation's documents just to update this state.
+        for request in self.sudo().filtered(lambda rec: rec.state not in ("closed", "cancelled")):
+            requested = defaultdict(float)
+            fulfilled = defaultdict(float)
+            for line in request.line_ids.filtered(lambda line: line.qty_requested > 0):
+                key = (line.request_type, line.product_id, False, False)
+                if line.request_type == "transfer":
+                    key = (line.request_type, line.product_id, line.source_location_id.id, request.location_id.id)
+                requested[key] += line.product_uom_id._compute_quantity(
+                    line.qty_requested, line.product_id.uom_id, round=False,
+                )
+
+            purchase_lines = request.purchase_order_ids.filtered(
+                lambda order: order.state in ("purchase", "done")
+            ).order_line.filtered("product_id")
+            for line in purchase_lines:
+                fulfilled[("purchase", line.product_id, False, False)] += line.product_uom._compute_quantity(
+                    line.product_qty, line.product_id.uom_id, round=False,
+                )
+            for move in request.picking_ids.move_ids.filtered(lambda move: move.state == "done"):
+                key = ("transfer", move.product_id, move.location_id.id, move.location_dest_id.id)
+                fulfilled[key] += move.product_uom._compute_quantity(
+                    move.quantity, move.product_id.uom_id, round=False,
+                )
+            if requested and all(
+                float_compare(fulfilled[key], quantity, precision_rounding=key[1].uom_id.rounding) >= 0
+                for key, quantity in requested.items()
+            ):
+                request.state = "closed"
+
     def action_generate_purchase_orders(self):
         self.ensure_one()
         self = self.with_company(self.company_id)
-        if self.request_type != "purchase":
-            raise UserError(_("Solo aplica para solicitudes de tipo compra."))
-
-        lines = self.line_ids.filtered(lambda l: l.selected_for_action and l.qty_requested > 0)
+        lines = self.line_ids.filtered(
+            lambda line: line.request_type == "purchase" and line.selected_for_action and line.qty_requested > 0
+        )
         if not lines:
-            raise UserError(_("Selecciona líneas con cantidad solicitada."))
+            raise UserError(_("Selecciona líneas de compra con cantidad solicitada mayor a cero."))
         if any(not line.vendor_id for line in lines):
             raise UserError(_("Indica un proveedor en cada línea seleccionada."))
         self._check_product_category()
@@ -196,29 +230,45 @@ class PurchaseRequest(models.Model):
     def action_generate_transfers(self):
         self.ensure_one()
         self = self.with_company(self.company_id)
-        if self.request_type != "transfer":
-            raise UserError(_("Solo aplica para solicitudes de tipo traslado."))
-
+        lines = self.line_ids.filtered(
+            lambda line: line.request_type == "transfer" and line.selected_for_action and line.qty_requested > 0
+        )
+        if not lines:
+            raise UserError(_("Selecciona líneas de traslado con cantidad solicitada mayor a cero."))
+        self._check_product_category()
         grouped = defaultdict(list)
-        for line in self.line_ids.filtered(lambda l: l.selected_for_action and l.qty_requested > 0 and l.source_location_id):
-            grouped[line.source_location_id.id].append(line)
-
-        if not grouped:
-            raise UserError(_("Selecciona líneas con ubicación origen y cantidad."))
-
-        picking_type = self.env["stock.picking.type"].search([
-            ("code", "=", "internal"), ("company_id", "=", self.company_id.id),
-        ], limit=1)
-        if not picking_type:
-            raise UserError(_("No hay tipo de operación interna configurado."))
+        for line in lines:
+            source = line.source_location_id
+            destination = self.location_id
+            if not source or not destination:
+                raise UserError(_("Indica el origen de cada línea de traslado y el destino de la solicitud."))
+            if source == destination:
+                raise UserError(_("El origen y el destino del traslado deben ser diferentes."))
+            locations = source | destination
+            if locations - locations.filtered_domain(STOCK_LOCATION_DOMAIN):
+                raise UserError(_("Los traslados requieren ubicaciones internas cuya ruta termine en /Stock."))
+            if any(not location.active for location in locations):
+                raise UserError(_("Las ubicaciones del traslado deben estar activas."))
+            picking_type = source.warehouse_id.int_type_id
+            if not picking_type:
+                picking_type = self.env["stock.picking.type"].search([
+                    ("code", "=", "internal"), ("company_id", "=", self.company_id.id),
+                    ("default_location_src_id", "=", source.id),
+                ], limit=1)
+            if not picking_type or not picking_type.active or picking_type.company_id != self.company_id:
+                raise UserError(_(
+                    "Configura un tipo de operación interna activo para el almacén de origen de %s.",
+                    source.display_name,
+                ))
+            grouped[(picking_type.id, source.id, destination.id)].append(line)
 
         created_pickings = self.env["stock.picking"]
-        for source_loc_id, lines in grouped.items():
+        for (picking_type_id, source_loc_id, destination_loc_id), lines in grouped.items():
             picking_vals = {
-                "picking_type_id": picking_type.id,
+                "picking_type_id": picking_type_id,
                 "company_id": self.company_id.id,
                 "location_id": source_loc_id,
-                "location_dest_id": self.location_id.id,
+                "location_dest_id": destination_loc_id,
                 "origin": self.name,
                 "purchase_request_id": self.id,
                 "move_ids_without_package": [],
@@ -230,7 +280,7 @@ class PurchaseRequest(models.Model):
                     "product_uom_qty": l.qty_requested,
                     "product_uom": l.product_uom_id.id,
                     "location_id": source_loc_id,
-                    "location_dest_id": self.location_id.id,
+                    "location_dest_id": destination_loc_id,
                 }))
             created_pickings |= self.env["stock.picking"].create(picking_vals)
 
@@ -249,6 +299,10 @@ class PurchaseRequestLine(models.Model):
     _check_company_auto = True
 
     request_id = fields.Many2one("purchase.request", required=True, ondelete="cascade")
+    request_type = fields.Selection([
+        ("purchase", "Compra"),
+        ("transfer", "Traslado"),
+    ], string="Tipo", default="purchase", required=True)
     company_id = fields.Many2one(related="request_id.company_id", store=True)
     category_id = fields.Many2one(related="request_id.category_id")
     product_id = fields.Many2one(
@@ -268,18 +322,25 @@ class PurchaseRequestLine(models.Model):
     )
     selected_for_action = fields.Boolean(string="Seleccionar")
 
+    @api.constrains("request_type", "source_location_id")
+    def _check_transfer_source(self):
+        for line in self:
+            if line.request_type == "transfer" and not line.source_location_id:
+                raise ValidationError(_("La ubicación origen es obligatoria en las líneas de traslado."))
+
     @api.constrains("product_id", "request_id")
     def _check_product_category(self):
         self.request_id._check_product_category()
 
-    @api.depends("product_id", "request_id.location_id")
+    @api.depends("product_id", "request_type", "source_location_id", "request_id.location_id")
     def _compute_qty_available_location(self):
         quant = self.env["stock.quant"]
         for line in self:
-            if line.product_id and line.request_id.location_id:
+            location = line.source_location_id if line.request_type == "transfer" else line.request_id.location_id
+            if line.product_id and location:
                 line.qty_available_location = sum(quant.search([
                     ("product_id", "=", line.product_id.id),
-                    ("location_id", "child_of", line.request_id.location_id.id),
+                    ("location_id", "child_of", location.id),
                 ]).mapped("quantity"))
             else:
                 line.qty_available_location = 0

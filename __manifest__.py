@@ -2,7 +2,7 @@
     "name": "Solicitud de Compra Interna",
     "summary": "Gestión interna de solicitudes de compra o traslado",
     "description": "Solicitudes internas con secuencia, categorías y recepción diferenciada para A&B e insumos.",
-    "version": "18.0.1.1.0",
+    "version": "18.0.1.2.0",
     "author": "Mayan",
     "license": "LGPL-3",
     "depends": ["base", "stock", "purchase_stock", "mail"],
