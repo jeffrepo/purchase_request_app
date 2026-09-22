@@ -24,6 +24,12 @@ el campo del encabezado. Conserva el destino de cada solicitud, los orígenes
 de las líneas y las compras y traslados ya vinculados. Si una línea de traslado
 antigua no tenía origen, deberá completarse antes de generar el traslado.
 
+Desde `18.0.1.2.1`, **Ubicación destino** es opcional al guardar la solicitud.
+Si hay líneas de traslado, se exige al confirmar la solicitud y al generar
+traslados. Las solicitudes que contienen únicamente compras pueden confirmarse
+y generar órdenes sin ese campo. Esta actualización utiliza el ajuste normal
+del esquema de Odoo; no necesita un script de migración adicional.
+
 ## Configuración por compañía
 
 En **Ajustes > Compras > Solicitudes de compra**, configurar:
