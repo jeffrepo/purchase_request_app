@@ -6,8 +6,8 @@
             <list>
                 <field name="name"/>
                 <field name="request_datetime"/>
-                <field name="request_type"/>
                 <field name="location_id"/>
+                <field name="category_id" optional="show"/>
                 <field name="state"/>
             </list>
         </field>
@@ -21,8 +21,8 @@
                 <header>
                     <button name="action_request" type="object" string="Solicitar" invisible="state != 'draft'"/>
                     <button name="action_confirm" type="object" string="Confirmar" invisible="state != 'requested'" groups="purchase_request_app.group_operations_manager"/>
-                    <button name="action_generate_purchase_orders" type="object" string="Generar solicitud de compra" invisible="state != 'confirmed' or request_type != 'purchase'" groups="purchase_request_app.group_warehouse_lead"/>
-                    <button name="action_generate_transfers" type="object" string="Generar traslado" invisible="state != 'confirmed' or request_type != 'transfer'" groups="purchase_request_app.group_warehouse_lead"/>
+                    <button name="action_generate_purchase_orders" type="object" string="Generar compras" invisible="state != 'confirmed'" groups="purchase_request_app.group_warehouse_lead"/>
+                    <button name="action_generate_transfers" type="object" string="Generar traslados" invisible="state != 'confirmed'" groups="purchase_request_app.group_warehouse_lead"/>
                     <button name="action_close" type="object" string="Cerrar" invisible="state in ('closed','cancelled')" groups="purchase_request_app.group_operations_manager"/>
                     <button name="action_cancel" type="object" string="Cancelar" invisible="state in ('closed','cancelled')"/>
                     <button name="action_reset_to_draft" type="object" string="Reiniciar" invisible="state != 'cancelled'"/>
@@ -33,10 +33,11 @@
                         <group>
                             <field name="name" readonly="1"/>
                             <field name="request_datetime"/>
+                            <field name="company_id" groups="base.group_multi_company"/>
                         </group>
                         <group>
-                            <field name="request_type"/>
-                            <field name="location_id"/>
+                            <field name="location_id" options="{'no_create': True}"/>
+                            <field name="category_id" options="{'no_create': True}"/>
                         </group>
                     </group>
                     <notebook>
@@ -44,11 +45,41 @@
                             <field name="line_ids">
                                 <list editable="bottom">
                                     <field name="selected_for_action"/>
-                                    <field name="product_id"/>
+                                    <field name="request_type"/>
+                                    <field name="company_id" column_invisible="True"/>
+                                    <field name="category_id" column_invisible="True"/>
+                                    <field name="product_id"
+                                           domain="[('categ_id', 'child_of', parent.category_id)] if parent.category_id else []"
+                                           options="{'no_create': True}"/>
                                     <field name="qty_available_location" readonly="1"/>
                                     <field name="qty_requested"/>
-                                    <field name="vendor_id" invisible="parent.request_type != 'purchase'"/>
-                                    <field name="source_location_id" invisible="parent.request_type != 'transfer'"/>
+                                    <field name="vendor_id" invisible="request_type != 'purchase'"/>
+                                    <field name="source_location_id" invisible="request_type != 'transfer'" required="request_type == 'transfer'" options="{'no_create': True}"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="Compras generadas" name="generated_purchases" groups="purchase.group_purchase_user">
+                            <field name="purchase_order_ids" readonly="1">
+                                <list create="0" edit="0" delete="0">
+                                    <field name="name"/>
+                                    <field name="partner_id"/>
+                                    <field name="date_order"/>
+                                    <field name="picking_type_id"/>
+                                    <field name="currency_id" column_invisible="True"/>
+                                    <field name="amount_total"/>
+                                    <field name="state"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="Traslados generados" name="generated_transfers" groups="stock.group_stock_user">
+                            <field name="picking_ids" readonly="1">
+                                <list create="0" edit="0" delete="0">
+                                    <field name="name"/>
+                                    <field name="picking_type_id"/>
+                                    <field name="location_id"/>
+                                    <field name="location_dest_id"/>
+                                    <field name="scheduled_date"/>
+                                    <field name="state"/>
                                 </list>
                             </field>
                         </page>

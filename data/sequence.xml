@@ -1,8 +1,9 @@
-<odoo>
+<odoo noupdate="1">
     <record id="seq_purchase_request" model="ir.sequence">
         <field name="name">Solicitud de Compra</field>
         <field name="code">purchase.request</field>
         <field name="prefix">SC</field>
         <field name="padding">5</field>
+        <field name="company_id" eval="False"/>
     </record>
 </odoo>
