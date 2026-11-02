@@ -61,7 +61,7 @@ class TestPurchaseRequest(TransactionCase):
     def _request(self, **values):
         return self.env["purchase.request"].create({
             "location_id": self.supplies_warehouse.lot_stock_id.id,
-            "company_id": self.company.id, **values,
+            "company_id": self.company.id, "category_id": self.root_category.id, **values,
         })
 
     def test_uom_follows_type_product_and_product_configuration(self):
@@ -92,6 +92,7 @@ class TestPurchaseRequest(TransactionCase):
         dozen = self.env.ref("uom.product_uom_dozen")
         self.ab_product.uom_po_id = dozen
         with Form(self.env["purchase.request"]) as form:
+            form.category_id = self.root_category
             with form.line_ids.new() as line:
                 line.product_id = self.ab_product
                 self.assertEqual(line.product_uom_id, dozen)
@@ -184,7 +185,7 @@ class TestPurchaseRequest(TransactionCase):
 
     def test_sequence_omitted_placeholder_batch_and_copy(self):
         requests = self.env["purchase.request"].create([
-            {"location_id": self.ab_warehouse.lot_stock_id.id, **values}
+            {"location_id": self.ab_warehouse.lot_stock_id.id, "category_id": self.root_category.id, **values}
             for values in ({}, {"name": "/"}, {"name": False}, {"name": ""}, {"name": "Nuevo"})
         ])
         requests |= requests[0].copy()
@@ -357,6 +358,7 @@ class TestPurchaseRequest(TransactionCase):
 
     def test_purchase_only_form_can_confirm_and_buy_without_destination(self):
         with Form(self.env["purchase.request"]) as form:
+            form.category_id = self.root_category
             with form.line_ids.new() as line:
                 line.product_id = self.ab_product
                 line.vendor_id = self.vendor
@@ -387,9 +389,8 @@ class TestPurchaseRequest(TransactionCase):
         request.action_confirm()
         request.action_generate_transfers()
         self.assertEqual(request.picking_ids.location_dest_id, request.location_id)
-        request.location_id = False
-        with self.assertRaisesRegex(UserError, "Ubicación destino"):
-            request.action_generate_transfers()
+        with self.assertRaisesRegex(UserError, "ubicación destino"):
+            request.location_id = False
         self.assertEqual(len(request.picking_ids), 1)
 
     def test_batch_confirmation_checks_even_unselected_transfer_lines_before_changing_states(self):
@@ -484,6 +485,7 @@ class TestPurchaseRequest(TransactionCase):
         self.env["stock.quant"]._update_available_quantity(self.ab_product, self.ab_warehouse.lot_stock_id, 9)
         self.env["stock.quant"]._update_available_quantity(self.ab_product, self.supplies_warehouse.lot_stock_id, 4)
         with Form(self.env["purchase.request"]) as form:
+            form.category_id = self.root_category
             form.location_id = self.supplies_warehouse.lot_stock_id
             with form.line_ids.new() as line:
                 line.request_type = "transfer"
@@ -513,7 +515,6 @@ class TestPurchaseRequest(TransactionCase):
         picking.move_ids.picked = True
         picking._action_done()
         self.assertEqual(request.state, "confirmed")
-        request.line_ids.selected_for_action = False
         request.line_ids[1].selected_for_action = True
         request.action_generate_purchase_orders()
         request.purchase_order_ids.filtered(lambda order: order.state == "draft").button_confirm()
@@ -557,6 +558,172 @@ class TestPurchaseRequest(TransactionCase):
         self.assertEqual(named.name, "LEGACY-456")
         self.assertFalse(sequence.company_id)
         self.assertTrue(sequence_ref.noupdate)
+
+    def test_category_is_required_for_creation_editing_and_form(self):
+        with self.assertRaisesRegex(ValidationError, "Categoría de productos"):
+            self._request(category_id=False)
+        with self.assertRaisesRegex(ValidationError, "Categoría de productos"):
+            self.env["purchase.request"].create({})
+        request = self._request()
+        with self.assertRaisesRegex(ValidationError, "Categoría de productos"):
+            request.category_id = False
+        with self.assertRaises(AssertionError), Form(self.env["purchase.request"]) as form:
+            form.location_id = self.supplies_warehouse.lot_stock_id
+        # Context defaults still work for imports and actions supplying a category.
+        request = self.env["purchase.request"].with_context(default_category_id=self.root_category.id).create({})
+        self.assertEqual(request.category_id, self.root_category)
+
+    def test_generated_lines_are_locked_and_buttons_cannot_generate_twice(self):
+        request = self._request(state="confirmed", line_ids=[
+            self._line(self.ab_product),
+            self._line(self.ab_product, request_type="transfer", source_location_id=self.ab_warehouse.lot_stock_id.id),
+        ])
+        self.assertTrue(request.has_pending_purchases)
+        self.assertTrue(request.has_pending_transfers)
+        request.action_generate_purchase_orders()
+        self.assertFalse(request.has_pending_purchases)
+        self.assertTrue(request.has_pending_transfers)
+        request.action_generate_transfers()
+        self.assertFalse(request.has_pending_transfers)
+        self.assertTrue(all(request.line_ids.mapped("is_processed")))
+        self.assertTrue(all(request.line_ids.mapped("selected_for_action")))
+        for line in request.line_ids:
+            for values in (
+                {"selected_for_action": False}, {"qty_requested": 3},
+                {"product_id": self.supplies_product.id}, {"vendor_id": self.other_vendor.id},
+                {"source_location_id": self.supplies_warehouse.lot_stock_id.id},
+                {"request_type": "purchase" if line.request_type == "transfer" else "transfer"},
+                {"request_id": self._request().id},
+            ):
+                with self.assertRaisesRegex(UserError, "ya generó"), self.cr.savepoint():
+                    line.write(values)
+            # Unchanged values sent by clients are safe.
+            line.write({"selected_for_action": True, "qty_requested": 2})
+            with self.assertRaisesRegex(UserError, "eliminar"), self.cr.savepoint():
+                line.unlink()
+        with self.assertRaisesRegex(UserError, "eliminar"), self.cr.savepoint():
+            request.unlink()
+        for method in (request.action_generate_purchase_orders, request.action_generate_transfers):
+            with self.assertRaisesRegex(UserError, "pendientes"):
+                method()
+        self.assertEqual(len(request.purchase_order_ids), 1)
+        self.assertEqual(len(request.picking_ids), 1)
+
+    def test_pending_lines_remain_editable_and_generate_without_reusing_processed_lines(self):
+        request = self._request(line_ids=[self._line(self.ab_product)])
+        request.action_generate_purchase_orders()
+        processed = request.line_ids
+        request.write({"line_ids": [
+            self._line(self.ab_product, selected_for_action=False),
+            self._line(self.ab_product, request_type="transfer", source_location_id=self.ab_warehouse.lot_stock_id.id),
+        ]})
+        pending = request.line_ids - processed
+        purchase = pending.filtered(lambda line: line.request_type == "purchase")
+        purchase.write({"selected_for_action": True, "qty_requested": 4})
+        with self.assertRaisesRegex(UserError, "ya generó"), self.cr.savepoint():
+            request.line_ids.selected_for_action = False
+        self.assertTrue(all(request.line_ids.mapped("selected_for_action")))
+        request.action_generate_purchase_orders()
+        request.action_generate_transfers()
+        self.assertEqual(len(request.purchase_order_ids.order_line), 2)
+        self.assertEqual(sum(request.purchase_order_ids.order_line.mapped("product_qty")), 6)
+        self.assertEqual(len(request.picking_ids.move_ids), 1)
+        self.assertTrue(all(request.line_ids.mapped("is_processed")))
+
+    def test_processed_form_fields_are_readonly(self):
+        request = self._request(line_ids=[self._line(self.ab_product)])
+        request.action_generate_purchase_orders()
+        with Form(request) as form:
+            with form.line_ids.edit(0) as line:
+                for field, value in (
+                    ("selected_for_action", False), ("is_processed", False),
+                    ("qty_requested", 3), ("request_type", "transfer"),
+                    ("product_id", self.supplies_product), ("vendor_id", self.other_vendor),
+                ):
+                    with self.assertRaises(AssertionError):
+                        setattr(line, field, value)
+
+    def test_marker_cannot_be_reset_and_survives_cancelled_deleted_documents(self):
+        request = self._request(line_ids=[
+            self._line(self.ab_product),
+            self._line(self.ab_product, request_type="transfer", source_location_id=self.ab_warehouse.lot_stock_id.id),
+        ])
+        request.action_generate_purchase_orders()
+        request.action_generate_transfers()
+        request.purchase_order_ids.button_cancel()
+        request.purchase_order_ids.unlink()
+        request.picking_ids.action_cancel()
+        request.picking_ids.unlink()
+        request.action_cancel()
+        request.action_reset_to_draft()
+        for line in request.line_ids:
+            with self.assertRaisesRegex(UserError, "manualmente"):
+                line.with_context(skip_processed_check=True).is_processed = False
+        for method in (request.action_generate_purchase_orders, request.action_generate_transfers):
+            with self.assertRaisesRegex(UserError, "pendientes"):
+                method()
+        self.assertTrue(all(request.line_ids.mapped("is_processed")))
+
+    def test_new_lines_and_copies_cannot_inherit_or_forge_processed_marker(self):
+        request = self._request(line_ids=[self._line(self.ab_product)])
+        request.action_generate_purchase_orders()
+        copy = request.line_ids.copy({"request_id": self._request().id})
+        self.assertFalse(copy.is_processed)
+        copy.qty_requested = 5
+        with self.assertRaisesRegex(UserError, "únicamente"), self.cr.savepoint():
+            self._request(line_ids=[self._line(self.ab_product, is_processed=True)])
+        line = self.env["purchase.request.line"].with_context(default_is_processed=True).create({
+            "request_id": request.id, "product_id": self.ab_product.id,
+        })
+        self.assertFalse(line.is_processed)
+
+    def test_generated_unit_and_transfer_destination_are_preserved(self):
+        request = self._request(line_ids=[
+            self._line(self.ab_product),
+            self._line(self.ab_product, request_type="transfer", source_location_id=self.ab_warehouse.lot_stock_id.id),
+        ])
+        request.action_generate_purchase_orders()
+        request.action_generate_transfers()
+        old_unit = request.line_ids.product_uom_id
+        self.ab_product.uom_po_id = self.env.ref("uom.product_uom_dozen")
+        self.assertEqual(request.line_ids.product_uom_id, old_unit)
+        self.assertEqual(request.purchase_order_ids.order_line.product_uom, old_unit)
+        with self.assertRaisesRegex(UserError, "ubicación destino"):
+            request.location_id = self.ab_warehouse.lot_stock_id
+
+    def test_failed_generation_leaves_lines_pending(self):
+        request = self._request(line_ids=[
+            self._line(self.ab_product), self._line(self.supplies_product),
+        ])
+        self.company.purchase_request_supplies_picking_type_id = False
+        with self.assertRaisesRegex(UserError, "Configura"), self.cr.savepoint():
+            request.action_generate_purchase_orders()
+        self.assertFalse(any(request.line_ids.mapped("is_processed")))
+        self.assertFalse(request.purchase_order_ids)
+        self.assertTrue(request.has_pending_purchases)
+
+    def test_migration_locks_matching_old_lines_including_ambiguous_and_cancelled(self):
+        request = self._request(line_ids=[
+            self._line(self.ab_product),
+            self._line(self.ab_product, selected_for_action=False),
+            self._line(self.ab_product, selected_for_action=False, vendor_id=self.other_vendor.id),
+            self._line(self.supplies_product, selected_for_action=False),
+            self._line(self.ab_product, request_type="transfer", source_location_id=self.ab_warehouse.lot_stock_id.id),
+            self._line(self.ab_product, request_type="transfer", selected_for_action=False,
+                       source_location_id=self.supplies_warehouse.lot_stock_id.id),
+        ])
+        request.action_generate_purchase_orders()
+        request.action_generate_transfers()
+        request.purchase_order_ids.button_cancel()
+        request.picking_ids.action_cancel()
+        self.env.flush_all()
+        self.cr.execute("UPDATE purchase_request_line SET is_processed = FALSE WHERE request_id = %s", [request.id])
+        migration = Path(__file__).parents[1] / "migrations/18.0.1.4.0/post-migrate.py"
+        migrate = runpy.run_path(str(migration))["migrate"]
+        for _ in range(2):
+            migrate(self.cr, "18.0.1.3.0")
+            request.line_ids.invalidate_recordset()
+            self.assertEqual(request.line_ids.mapped("is_processed"), [True, True, False, False, True, False])
 
     def test_migration_moves_legacy_header_type_to_lines(self):
         purchase = self._request(line_ids=[self._line(self.supplies_product)])

@@ -30,7 +30,7 @@ class PurchaseRequest(models.Model):
         help="Obligatoria al confirmar solicitudes con traslados y al generarlos. Opcional para compras.",
     )
     category_id = fields.Many2one(
-        "product.category", string="Categoría de productos",
+        "product.category", string="Categoría de productos", required=True,
         help="Permite productos de esta categoría y de todas sus subcategorías.",
     )
     line_ids = fields.One2many("purchase.request.line", "request_id", string="Productos")
@@ -48,10 +48,42 @@ class PurchaseRequest(models.Model):
         "stock.picking", "purchase_request_id", string="Traslados generados", readonly=True,
         domain=[("picking_type_id.code", "=", "internal")],
     )
+    has_pending_purchases = fields.Boolean(compute="_compute_pending_operations")
+    has_pending_transfers = fields.Boolean(compute="_compute_pending_operations")
+
+    @api.depends("line_ids.request_type", "line_ids.is_processed", "line_ids.qty_requested")
+    def _compute_pending_operations(self):
+        for request in self:
+            pending = request.line_ids.filtered(lambda line: not line.is_processed and line.qty_requested > 0)
+            request.has_pending_purchases = any(line.request_type == "purchase" for line in pending)
+            request.has_pending_transfers = any(line.request_type == "transfer" for line in pending)
+
+    def write(self, vals):
+        if "category_id" in vals and not vals["category_id"]:
+            raise ValidationError(_("La Categoría de productos es obligatoria."))
+        if {"company_id", "location_id"} & vals.keys():
+            self.line_ids._lock_for_processing()
+            for request in self:
+                processed = request.line_ids.filtered("is_processed")
+                if processed and "company_id" in vals and vals["company_id"] != request.company_id.id:
+                    raise UserError(_("No puedes cambiar la compañía de una solicitud con líneas procesadas."))
+                if (any(line.request_type == "transfer" for line in processed)
+                        and "location_id" in vals and vals["location_id"] != request.location_id.id):
+                    raise UserError(_("No puedes cambiar la ubicación destino de un traslado ya generado."))
+        return super().write(vals)
+
+    @api.ondelete(at_uninstall=False)
+    def _unlink_except_processed(self):
+        self.line_ids._lock_for_processing()
+        if any(self.line_ids.mapped("is_processed")):
+            raise UserError(_("No puedes eliminar una solicitud con líneas procesadas."))
 
     @api.model_create_multi
     def create(self, vals_list):
+        default_category = self.default_get(["category_id"]).get("category_id")
         for vals in vals_list:
+            if not vals.get("category_id", default_category):
+                raise ValidationError(_("La Categoría de productos es obligatoria."))
             if not vals.get("name") or vals["name"] in ("/", "Nuevo", _("Nuevo")):
                 company = self.env["res.company"].browse(
                     vals.get("company_id") or self.default_get(["company_id"])["company_id"]
@@ -68,6 +100,8 @@ class PurchaseRequest(models.Model):
 
     @api.constrains("category_id", "line_ids")
     def _check_product_category(self):
+        if any(not request.category_id for request in self):
+            raise ValidationError(_("La Categoría de productos es obligatoria."))
         for request in self.filtered("category_id"):
             categories = self.env["product.category"].search([
                 ("id", "child_of", request.category_id.id),
@@ -107,6 +141,7 @@ class PurchaseRequest(models.Model):
             )
 
     def action_confirm(self):
+        self._check_product_category()
         self._check_transfer_destination()
         for rec in self:
             rec.state = "confirmed"
@@ -169,11 +204,16 @@ class PurchaseRequest(models.Model):
     def action_generate_purchase_orders(self):
         self.ensure_one()
         self = self.with_company(self.company_id)
+        self.line_ids._lock_for_processing()
         lines = self.line_ids.filtered(
-            lambda line: line.request_type == "purchase" and line.selected_for_action and line.qty_requested > 0
+            lambda line: line.request_type == "purchase" and line.selected_for_action
+            and line.qty_requested > 0 and not line.is_processed
         )
         if not lines:
-            raise UserError(_("Selecciona líneas de compra con cantidad solicitada mayor a cero."))
+            raise UserError(_(
+                "Selecciona líneas de compra pendientes con cantidad solicitada mayor a cero. "
+                "Las líneas procesadas no pueden generar otra compra."
+            ))
         if any(not line.vendor_id for line in lines):
             raise UserError(_("Indica un proveedor en cada línea seleccionada."))
         self._check_product_category()
@@ -230,6 +270,7 @@ class PurchaseRequest(models.Model):
                 }))
             po = po_model.create(vals)
             created_pos |= po
+            self.env["purchase.request.line"].browse([line.id for line in lines])._mark_processed()
         return {
             "type": "ir.actions.act_window",
             "name": _("Órdenes de Compra"),
@@ -241,12 +282,17 @@ class PurchaseRequest(models.Model):
     def action_generate_transfers(self):
         self.ensure_one()
         self = self.with_company(self.company_id)
+        self.line_ids._lock_for_processing()
         self._check_transfer_destination()
         lines = self.line_ids.filtered(
-            lambda line: line.request_type == "transfer" and line.selected_for_action and line.qty_requested > 0
+            lambda line: line.request_type == "transfer" and line.selected_for_action
+            and line.qty_requested > 0 and not line.is_processed
         )
         if not lines:
-            raise UserError(_("Selecciona líneas de traslado con cantidad solicitada mayor a cero."))
+            raise UserError(_(
+                "Selecciona líneas de traslado pendientes con cantidad solicitada mayor a cero. "
+                "Las líneas procesadas no pueden generar otro traslado."
+            ))
         self._check_product_category()
         grouped = defaultdict(list)
         for line in lines:
@@ -295,6 +341,7 @@ class PurchaseRequest(models.Model):
                     "location_dest_id": destination_loc_id,
                 }))
             created_pickings |= self.env["stock.picking"].create(picking_vals)
+            self.env["purchase.request.line"].browse([line.id for line in lines])._mark_processed()
 
         return {
             "type": "ir.actions.act_window",
@@ -337,10 +384,63 @@ class PurchaseRequestLine(models.Model):
         domain=STOCK_LOCATION_DOMAIN, check_company=True,
     )
     selected_for_action = fields.Boolean(string="Seleccionar")
+    is_processed = fields.Boolean(
+        string="Procesada", readonly=True, copy=False, default=False,
+        help="La línea ya generó una compra o un traslado y no puede modificarse ni reutilizarse.",
+    )
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        for vals in vals_list:
+            if vals.get("is_processed"):
+                raise UserError(_("El estado Procesada se asigna únicamente al generar documentos."))
+            # Also override context defaults, including when duplicating a request.
+            vals["is_processed"] = False
+        return super().create(vals_list)
+
+    def _lock_for_processing(self):
+        """Serialize generation and edits; Odoo retries concurrent transactions."""
+        if not self:
+            return
+        self.check_access("write")
+        self.flush_recordset()
+        self.env.cr.execute(
+            "SELECT id FROM purchase_request_line WHERE id IN %s ORDER BY id FOR UPDATE",
+            [tuple(self.ids)],
+        )
+        self.invalidate_recordset()
+
+    def _mark_processed(self):
+        # Private method: no RPC/context bypass can reset or set the marker.
+        return super().write({"is_processed": True})
+
+    def write(self, vals):
+        if "is_processed" in vals:
+            raise UserError(_("El estado Procesada no se puede modificar manualmente."))
+        self._lock_for_processing()
+        for line in self.filtered("is_processed"):
+            for name, value in vals.items():
+                field = self._fields[name]
+                current = line[name].id if field.type == "many2one" else line[name]
+                if current != value:
+                    raise UserError(_(
+                        "La línea de %(product)s ya generó una compra o un traslado. "
+                        "No puedes modificarla ni cambiar su selección.",
+                        product=line.product_id.display_name,
+                    ))
+        return super().write(vals)
+
+    @api.ondelete(at_uninstall=False)
+    def _unlink_except_processed(self):
+        self._lock_for_processing()
+        if any(self.mapped("is_processed")):
+            raise UserError(_("No puedes eliminar una línea que ya generó una compra o un traslado."))
 
     @api.depends("request_type", "product_id.uom_po_id", "product_id.uom_id")
     def _compute_product_uom_id(self):
         for line in self:
+            if line.is_processed and line.product_uom_id:
+                continue
             line.product_uom_id = (
                 line.product_id.uom_po_id if line.request_type == "purchase" else line.product_id.uom_id
             )
