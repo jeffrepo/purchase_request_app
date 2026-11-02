@@ -1,0 +1,25 @@
+<odoo>
+    <template id="report_picking_transfer_signatures" inherit_id="stock.report_picking">
+        <xpath expr="//div[hasclass('o_report_stockpicking_operations')]" position="inside">
+            <div name="purchase_request_transfer_signatures"
+                 t-if="o.picking_type_id.code == 'internal' and o.purchase_request_id"
+                 style="margin-top: 12mm; page-break-inside: avoid;">
+                <table class="table table-borderless"
+                       style="width: 100%; table-layout: fixed; page-break-inside: avoid;">
+                    <tbody>
+                        <tr>
+                            <td style="width: 50%; padding: 0 10mm; text-align: center;">
+                                <div style="height: 18mm; border-bottom: 1px solid #000; margin-bottom: 2mm;"/>
+                                <strong>Despacho</strong>
+                            </td>
+                            <td style="width: 50%; padding: 0 10mm; text-align: center;">
+                                <div style="height: 18mm; border-bottom: 1px solid #000; margin-bottom: 2mm;"/>
+                                <strong>Recibido</strong>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </xpath>
+    </template>
+</odoo>
