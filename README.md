@@ -112,6 +112,13 @@ su flujo de recepción configurado.
 - Las pestañas **Compras generadas** y **Traslados generados** muestran los
   documentos vinculados, sus estados y ubicaciones, y permiten abrirlos desde la
   solicitud, con los permisos habituales de Compras e Inventario.
+- Al abrir un traslado interno vinculado a una solicitud, su formulario incluye
+  el botón **Imprimir traslado**. Desde `18.0.1.4.1`, este botón ejecuta el reporte
+  estándar **Operaciones de albarán** (`stock.report_picking`) en PDF, en cualquier
+  estado del traslado, usando la acción `stock.action_report_picking`.
+  Al final del reporte de estos traslados aparecen dos espacios de firma,
+  **Despacho** y **Recibido**, uno junto al otro. Se imprimen después del contenido
+  y permanecen juntos si es necesario pasar a una página nueva.
 - El cierre automático requiere cubrir todas las cantidades: compras confirmadas
   para las líneas de compra y movimientos terminados para las líneas de traslado.
   Un mismo producto puede aparecer en ambos tipos sin que una compra complete el
