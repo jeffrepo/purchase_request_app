@@ -21,14 +21,16 @@
                 <header>
                     <button name="action_request" type="object" string="Solicitar" invisible="state != 'draft'"/>
                     <button name="action_confirm" type="object" string="Confirmar" invisible="state != 'requested'" groups="purchase_request_app.group_operations_manager"/>
-                    <button name="action_generate_purchase_orders" type="object" string="Generar compras" invisible="state != 'confirmed'" groups="purchase_request_app.group_warehouse_lead"/>
-                    <button name="action_generate_transfers" type="object" string="Generar traslados" invisible="state != 'confirmed'" groups="purchase_request_app.group_warehouse_lead"/>
+                    <button name="action_generate_purchase_orders" type="object" string="Generar compras" invisible="state != 'confirmed' or not has_pending_purchases" groups="purchase_request_app.group_warehouse_lead"/>
+                    <button name="action_generate_transfers" type="object" string="Generar traslados" invisible="state != 'confirmed' or not has_pending_transfers" groups="purchase_request_app.group_warehouse_lead"/>
                     <button name="action_close" type="object" string="Cerrar" invisible="state in ('closed','cancelled')" groups="purchase_request_app.group_operations_manager"/>
                     <button name="action_cancel" type="object" string="Cancelar" invisible="state in ('closed','cancelled')"/>
                     <button name="action_reset_to_draft" type="object" string="Reiniciar" invisible="state != 'cancelled'"/>
                     <field name="state" widget="statusbar" statusbar_visible="draft,requested,confirmed,closed,cancelled"/>
                 </header>
                 <sheet>
+                    <field name="has_pending_purchases" invisible="1"/>
+                    <field name="has_pending_transfers" invisible="1"/>
                     <group>
                         <group>
                             <field name="name" readonly="1"/>
@@ -44,18 +46,19 @@
                         <page string="Productos">
                             <field name="line_ids">
                                 <list editable="bottom">
-                                    <field name="selected_for_action"/>
-                                    <field name="request_type"/>
+                                    <field name="selected_for_action" readonly="is_processed"/>
+                                    <field name="is_processed" readonly="1"/>
+                                    <field name="request_type" readonly="is_processed"/>
                                     <field name="company_id" column_invisible="True"/>
                                     <field name="category_id" column_invisible="True"/>
-                                    <field name="product_id"
+                                    <field name="product_id" readonly="is_processed"
                                            domain="[('categ_id', 'child_of', parent.category_id)] if parent.category_id else []"
                                            options="{'no_create': True}"/>
                                     <field name="qty_available_location" readonly="1"/>
-                                    <field name="qty_requested"/>
+                                    <field name="qty_requested" readonly="is_processed"/>
                                     <field name="product_uom_id" readonly="1"/>
-                                    <field name="vendor_id" invisible="request_type != 'purchase'"/>
-                                    <field name="source_location_id" invisible="request_type != 'transfer'" required="request_type == 'transfer'" options="{'no_create': True}"/>
+                                    <field name="vendor_id" readonly="is_processed" invisible="request_type != 'purchase'"/>
+                                    <field name="source_location_id" readonly="is_processed" invisible="request_type != 'transfer'" required="request_type == 'transfer'" options="{'no_create': True}"/>
                                 </list>
                             </field>
                         </page>

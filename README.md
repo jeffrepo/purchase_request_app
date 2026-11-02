@@ -36,6 +36,20 @@ las cantidades de los traslados existentes se convierten de la unidad anterior
 a la de venta para conservar la cantidad física; los documentos ya generados
 conservan sus unidades y cantidades originales.
 
+Desde `18.0.1.4.0`, las líneas que generan una compra o un traslado quedan
+marcadas como **Procesadas** y bloqueadas. La actualización también bloquea
+las líneas anteriores que coinciden con documentos vinculados, incluidos los
+cancelados, por solicitud, tipo, producto y proveedor u origen. Las versiones
+anteriores no guardaban un vínculo con cada línea: si varias líneas coinciden,
+todas quedan bloqueadas para evitar volver a generar el mismo documento.
+Los documentos eliminados antes de actualizar no dejan evidencia suficiente
+para identificar sus líneas.
+
+**Categoría de productos** pasa a ser obligatoria. Las solicitudes anteriores
+que la tengan vacía deben completarla al editar el formulario y antes de
+confirmarlas o generar documentos; la actualización no asigna una categoría
+arbitraria a datos existentes.
+
 ## Configuración por compañía
 
 En **Ajustes > Compras > Solicitudes de compra**, configurar:
@@ -61,8 +75,8 @@ su flujo de recepción configurado.
   la ruta completa, por ejemplo `A/Stock`, y se excluyen las ubicaciones padre y
   otros estantes o ubicaciones internas.
 - **Categoría de productos** en la solicitud filtra los productos de sus líneas
-  a esa categoría y todas sus descendientes. Sin categoría se permiten todas,
-  incluyendo solicitudes mixtas. Al cambiarla, los productos existentes deben
+  a esa categoría y todas sus descendientes. Es obligatoria y debe abarcar todos
+  los productos de la solicitud. Al cambiarla, los productos existentes deben
   seguir perteneciendo a la categoría seleccionada; no se eliminan líneas.
 - Cada línea tiene un **Tipo**: **Compra** o **Traslado**. Una solicitud puede
   combinar ambos. El origen es obligatorio para las líneas de traslado, tanto
@@ -74,15 +88,24 @@ su flujo de recepción configurado.
   se compra por docena y se vende por unidad usa docenas para compras y unidades
   para traslados.
 - **Generar compras** procesa únicamente las líneas de compra seleccionadas con
-  cantidad positiva. Cada línea debe tener proveedor. Se crea una orden por combinación
+  cantidad positiva que aún no estén procesadas. Cada línea debe tener proveedor. Se crea una orden por combinación
   de proveedor y tipo de operación; A&B e insumos con operaciones distintas nunca
   se mezclan en una misma orden aunque compartan proveedor.
 - **Generar traslados** procesa únicamente las líneas de traslado seleccionadas
-  con cantidad positiva. Todas usan la **Ubicación destino** del encabezado;
+  con cantidad positiva que aún no estén procesadas. Todas usan la **Ubicación destino** del encabezado;
   pueden tener orígenes distintos, elegidos en **Ubicación origen** de cada línea.
   Se agrupan por origen y se utiliza el tipo de operación interna de ese almacén.
   Para otro destino se debe crear otra solicitud. No se permite trasladar entre
   una misma ubicación ni omitir silenciosamente líneas sin origen.
+- Al generar el documento, la línea queda **Procesada**: se conserva su selección
+  y no se permite desmarcarla, editarla ni eliminarla, tampoco por importación/API.
+  El bloqueo permanece si se cancela o elimina el documento generado o se reinicia
+  la solicitud. Las líneas pendientes y las nuevas siguen siendo editables.
+  Los botones se ocultan cuando no quedan líneas pendientes con cantidad positiva
+  de su tipo y, en el servidor, excluyen siempre las ya procesadas. Las llamadas
+  simultáneas se serializan para impedir documentos duplicados.
+  Tampoco se permite cambiar el destino tras generar un traslado, cambiar la
+  compañía o eliminar una solicitud con líneas procesadas.
 - La existencia de una línea de traslado se consulta en su origen; la de una
   línea de compra, en la ubicación del encabezado. En compras, la recepción
   continúa usando el destino del tipo de operación configurado para su categoría.
@@ -110,3 +133,6 @@ agrupación por proveedor, configuración incompleta, traslados y migración de
 referencias anteriores. También cubren solicitudes con ambos tipos, agrupación
 por origen con destino común, orígenes obligatorios, existencias en origen,
 cierre por cantidades, traslados parciales y migración del tipo a las líneas.
+Además, verifican la categoría obligatoria, el bloqueo de líneas procesadas,
+su persistencia tras cancelar/eliminar documentos, generación de nuevas líneas
+sin duplicar las anteriores y actualización de líneas históricas.
