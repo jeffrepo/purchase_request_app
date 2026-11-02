@@ -64,6 +64,124 @@ class TestPurchaseRequest(TransactionCase):
             "company_id": self.company.id, **values,
         })
 
+    def test_uom_follows_type_product_and_product_configuration(self):
+        unit = self.env.ref("uom.product_uom_unit")
+        dozen = self.env.ref("uom.product_uom_dozen")
+        self.ab_product.uom_po_id = dozen
+        request = self._request(line_ids=[
+            self._line(self.ab_product),
+            self._line(self.ab_product, request_type="transfer",
+                       source_location_id=self.ab_warehouse.lot_stock_id.id),
+        ])
+        purchase, transfer = request.line_ids
+        self.assertEqual(purchase.product_uom_id, dozen)
+        self.assertEqual(transfer.product_uom_id, unit)
+        purchase.write({"request_type": "transfer", "source_location_id": self.ab_warehouse.lot_stock_id.id})
+        self.assertEqual(purchase.product_uom_id, unit)
+        purchase.request_type = "purchase"
+        self.assertEqual(purchase.product_uom_id, dozen)
+        purchase.product_id = self.supplies_product
+        self.assertEqual(purchase.product_uom_id, unit)
+        purchase.product_id = self.ab_product
+        self.ab_product.uom_po_id = unit
+        self.assertEqual(purchase.product_uom_id, unit)
+        self.assertEqual(transfer.product_uom_id, unit)
+
+    def test_form_always_displays_uom_and_changes_it_with_line_type(self):
+        unit = self.env.ref("uom.product_uom_unit")
+        dozen = self.env.ref("uom.product_uom_dozen")
+        self.ab_product.uom_po_id = dozen
+        with Form(self.env["purchase.request"]) as form:
+            with form.line_ids.new() as line:
+                line.product_id = self.ab_product
+                self.assertEqual(line.product_uom_id, dozen)
+                line.request_type = "transfer"
+                line.source_location_id = self.ab_warehouse.lot_stock_id
+                self.assertEqual(line.product_uom_id, unit)
+            with form.line_ids.new() as line:
+                line.product_id = self.supplies_product
+                self.assertEqual(line.product_uom_id, unit)
+                line.request_type = "transfer"
+                line.source_location_id = self.ab_warehouse.lot_stock_id
+                self.assertEqual(line.product_uom_id, unit)
+                line.request_type = "purchase"
+                self.assertEqual(line.product_uom_id, unit)
+        self.assertEqual(form.record.line_ids.product_uom_id, unit)
+
+    def test_stock_is_expressed_in_the_displayed_uom_without_rounding(self):
+        self.ab_product.write({"uom_po_id": self.env.ref("uom.product_uom_dozen").id, "is_storable": True})
+        self.env["stock.quant"]._update_available_quantity(self.ab_product, self.supplies_warehouse.lot_stock_id, 18)
+        self.env["stock.quant"]._update_available_quantity(self.ab_product, self.ab_warehouse.lot_stock_id, 25)
+        request = self._request(line_ids=[
+            self._line(self.ab_product),
+            self._line(self.ab_product, request_type="transfer", source_location_id=self.ab_warehouse.lot_stock_id.id),
+        ])
+        purchase, transfer = request.line_ids
+        self.assertAlmostEqual(purchase.qty_available_location, 1.5)
+        self.assertEqual(transfer.qty_available_location, 25)
+        request.location_id = False
+        self.assertEqual(purchase.qty_available_location, 0)
+        self.assertEqual(transfer.qty_available_location, 25)
+
+    def test_generated_documents_and_closure_use_each_line_uom(self):
+        unit = self.env.ref("uom.product_uom_unit")
+        dozen = self.env.ref("uom.product_uom_dozen")
+        self.ab_product.uom_po_id = dozen
+        request = self._request(state="confirmed", line_ids=[
+            self._line(self.ab_product, qty_requested=2),
+            self._line(self.ab_product, request_type="transfer", qty_requested=3,
+                       source_location_id=self.ab_warehouse.lot_stock_id.id),
+        ])
+        request.action_generate_purchase_orders()
+        request.action_generate_transfers()
+        order_line = request.purchase_order_ids.order_line
+        move = request.picking_ids.move_ids
+        self.assertEqual(order_line.product_uom, dozen)
+        self.assertEqual(order_line.product_qty, 2)
+        self.assertEqual(move.product_uom, unit)
+        self.assertEqual(move.product_uom_qty, 3)
+        request.purchase_order_ids.button_confirm()
+        self.assertEqual(request.state, "confirmed")
+        request.picking_ids.action_confirm()
+        move.quantity = 3
+        move.picked = True
+        request.picking_ids._action_done()
+        self.assertEqual(request.state, "closed")
+
+    def test_uom_migration_preserves_old_transfer_quantities_and_is_idempotent(self):
+        unit = self.env.ref("uom.product_uom_unit")
+        dozen = self.env.ref("uom.product_uom_dozen")
+        self.ab_product.uom_po_id = dozen
+        request = self._request(line_ids=[
+            self._line(self.ab_product),
+            self._line(self.ab_product, request_type="transfer", qty_requested=2,
+                       source_location_id=self.ab_warehouse.lot_stock_id.id),
+            self._line(self.ab_product, request_type="transfer", qty_requested=-0.5,
+                       source_location_id=self.ab_warehouse.lot_stock_id.id),
+            self._line(self.supplies_product, request_type="transfer",
+                       source_location_id=self.ab_warehouse.lot_stock_id.id),
+        ])
+        purchase, transfer, negative, same_unit = request.line_ids
+        self.env.flush_all()
+        # Reproduce the former stored related field, which used purchase UoM for every type.
+        self.cr.execute(
+            "UPDATE purchase_request_line SET product_uom_id = %s WHERE id IN %s",
+            [dozen.id, tuple((transfer | negative).ids)],
+        )
+        migration = Path(__file__).parents[1] / "migrations/18.0.1.3.0/pre-migrate.py"
+        migrate = runpy.run_path(str(migration))["migrate"]
+        for _ in range(2):
+            migrate(self.cr, "18.0.1.2.1")
+            request.line_ids.invalidate_recordset(["product_uom_id", "qty_requested"])
+            self.assertEqual(purchase.product_uom_id, dozen)
+            self.assertEqual(purchase.qty_requested, 2)
+            self.assertEqual(transfer.product_uom_id, unit)
+            self.assertEqual(transfer.qty_requested, 24)
+            self.assertEqual(negative.product_uom_id, unit)
+            self.assertEqual(negative.qty_requested, -6)
+            self.assertEqual(same_unit.product_uom_id, unit)
+            self.assertEqual(same_unit.qty_requested, 2)
+
     def test_sequence_omitted_placeholder_batch_and_copy(self):
         requests = self.env["purchase.request"].create([
             {"location_id": self.ab_warehouse.lot_stock_id.id, **values}

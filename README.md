@@ -30,6 +30,12 @@ traslados. Las solicitudes que contienen únicamente compras pueden confirmarse
 y generar órdenes sin ese campo. Esta actualización utiliza el ajuste normal
 del esquema de Odoo; no necesita un script de migración adicional.
 
+Desde `18.0.1.3.0`, cada línea muestra su unidad de medida: la unidad de compra
+del producto para **Compra** y su unidad de venta para **Traslado**. Al actualizar,
+las cantidades de los traslados existentes se convierten de la unidad anterior
+a la de venta para conservar la cantidad física; los documentos ya generados
+conservan sus unidades y cantidades originales.
+
 ## Configuración por compañía
 
 En **Ajustes > Compras > Solicitudes de compra**, configurar:
@@ -61,6 +67,12 @@ su flujo de recepción configurado.
 - Cada línea tiene un **Tipo**: **Compra** o **Traslado**. Una solicitud puede
   combinar ambos. El origen es obligatorio para las líneas de traslado, tanto
   en el formulario como al crear o editar por API.
+- **Unidad de medida** se muestra siempre y se determina automáticamente por
+  el tipo de línea y el producto, aunque ambas unidades coincidan. La cantidad
+  solicitada y la existencia se expresan en esa unidad; las compras y movimientos
+  generados utilizan la misma unidad que la línea. Por ejemplo, un producto que
+  se compra por docena y se vende por unidad usa docenas para compras y unidades
+  para traslados.
 - **Generar compras** procesa únicamente las líneas de compra seleccionadas con
   cantidad positiva. Cada línea debe tener proveedor. Se crea una orden por combinación
   de proveedor y tipo de operación; A&B e insumos con operaciones distintas nunca

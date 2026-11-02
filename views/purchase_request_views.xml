@@ -53,6 +53,7 @@
                                            options="{'no_create': True}"/>
                                     <field name="qty_available_location" readonly="1"/>
                                     <field name="qty_requested"/>
+                                    <field name="product_uom_id" readonly="1"/>
                                     <field name="vendor_id" invisible="request_type != 'purchase'"/>
                                     <field name="source_location_id" invisible="request_type != 'transfer'" required="request_type == 'transfer'" options="{'no_create': True}"/>
                                 </list>
