@@ -321,7 +321,11 @@ class PurchaseRequestLine(models.Model):
         "product.product", required=True, check_company=True,
         domain="[('categ_id', 'child_of', category_id)] if category_id else []",
     )
-    product_uom_id = fields.Many2one(related="product_id.uom_po_id", store=True)
+    product_uom_id = fields.Many2one(
+        "uom.uom", string="Unidad de medida", compute="_compute_product_uom_id",
+        store=True, readonly=True,
+        help="Unidad de compra para compras y unidad de venta del producto para traslados.",
+    )
     qty_available_location = fields.Float(string="Existencia", compute="_compute_qty_available_location")
     qty_requested = fields.Float(string="Cantidad a solicitar", required=True, default=1.0)
     vendor_id = fields.Many2one(
@@ -334,6 +338,13 @@ class PurchaseRequestLine(models.Model):
     )
     selected_for_action = fields.Boolean(string="Seleccionar")
 
+    @api.depends("request_type", "product_id.uom_po_id", "product_id.uom_id")
+    def _compute_product_uom_id(self):
+        for line in self:
+            line.product_uom_id = (
+                line.product_id.uom_po_id if line.request_type == "purchase" else line.product_id.uom_id
+            )
+
     @api.constrains("request_type", "source_location_id")
     def _check_transfer_source(self):
         for line in self:
@@ -344,15 +355,18 @@ class PurchaseRequestLine(models.Model):
     def _check_product_category(self):
         self.request_id._check_product_category()
 
-    @api.depends("product_id", "request_type", "source_location_id", "request_id.location_id")
+    @api.depends("product_id", "product_uom_id", "request_type", "source_location_id", "request_id.location_id")
     def _compute_qty_available_location(self):
         quant = self.env["stock.quant"]
         for line in self:
             location = line.source_location_id if line.request_type == "transfer" else line.request_id.location_id
             if line.product_id and location:
-                line.qty_available_location = sum(quant.search([
+                quantity = sum(quant.search([
                     ("product_id", "=", line.product_id.id),
                     ("location_id", "child_of", location.id),
                 ]).mapped("quantity"))
+                line.qty_available_location = line.product_id.uom_id._compute_quantity(
+                    quantity, line.product_uom_id, round=False,
+                )
             else:
                 line.qty_available_location = 0
