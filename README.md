@@ -24,11 +24,13 @@ el campo del encabezado. Conserva el destino de cada solicitud, los orígenes
 de las líneas y las compras y traslados ya vinculados. Si una línea de traslado
 antigua no tenía origen, deberá completarse antes de generar el traslado.
 
-Desde `18.0.1.2.1`, **Ubicación destino** es opcional al guardar la solicitud.
-Si hay líneas de traslado, se exige al confirmar la solicitud y al generar
-traslados. Las solicitudes que contienen únicamente compras pueden confirmarse
-y generar órdenes sin ese campo. Esta actualización utiliza el ajuste normal
-del esquema de Odoo; no necesita un script de migración adicional.
+Entre `18.0.1.2.1` y `18.0.1.4.1`, **Ubicación destino** era opcional para
+compras y se exigía al confirmar solicitudes con traslados o al generarlos.
+Desde `18.0.1.4.2` es obligatoria en todas las solicitudes, incluidas las de
+solo compras, al crear y editar en el formulario o por importación/API.
+En solicitudes antiguas sin destino, debe completarse antes de solicitar,
+confirmar, generar documentos o guardar cambios. No se asigna un destino
+arbitrario al actualizar.
 
 Desde `18.0.1.3.0`, cada línea muestra su unidad de medida: la unidad de compra
 del producto para **Compra** y su unidad de venta para **Traslado**. Al actualizar,
@@ -49,6 +51,12 @@ para identificar sus líneas.
 que la tengan vacía deben completarla al editar el formulario y antes de
 confirmarlas o generar documentos; la actualización no asigna una categoría
 arbitraria a datos existentes.
+
+Desde `18.0.1.4.2`, el selector resuelve explícitamente la categoría seleccionada
+y todas sus descendientes recorriendo `parent_id`, sin depender del índice
+`parent_path`. La misma jerarquía se utiliza para validar productos y determinar
+la operación A&B. Por ejemplo, seleccionar `TODOS / A&B` incluye productos de
+`TODOS / A&B / ABARROTES / Abart` y de cualquier nivel inferior.
 
 ## Configuración por compañía
 
@@ -74,6 +82,7 @@ su flujo de recepción configurado.
   internas cuya ruta termina en `/Stock` (sin distinguir mayúsculas). Se muestra
   la ruta completa, por ejemplo `A/Stock`, y se excluyen las ubicaciones padre y
   otros estantes o ubicaciones internas.
+  **Ubicación destino** es obligatoria para todos los tipos de solicitud.
 - **Categoría de productos** en la solicitud filtra los productos de sus líneas
   a esa categoría y todas sus descendientes. Es obligatoria y debe abarcar todos
   los productos de la solicitud. Al cambiarla, los productos existentes deben
@@ -143,3 +152,5 @@ cierre por cantidades, traslados parciales y migración del tipo a las líneas.
 Además, verifican la categoría obligatoria, el bloqueo de líneas procesadas,
 su persistencia tras cancelar/eliminar documentos, generación de nuevas líneas
 sin duplicar las anteriores y actualización de líneas históricas.
+También cubren búsquedas por nombre y código en subcategorías profundas,
+jerarquías con un índice desactualizado y destino obligatorio para todos los tipos.

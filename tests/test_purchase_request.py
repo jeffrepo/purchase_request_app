@@ -1,5 +1,8 @@
 from pathlib import Path
+from types import SimpleNamespace
 import runpy
+
+from lxml import etree
 
 from odoo import Command
 from odoo.exceptions import UserError, ValidationError
@@ -93,6 +96,7 @@ class TestPurchaseRequest(TransactionCase):
         self.ab_product.uom_po_id = dozen
         with Form(self.env["purchase.request"]) as form:
             form.category_id = self.root_category
+            form.location_id = self.supplies_warehouse.lot_stock_id
             with form.line_ids.new() as line:
                 line.product_id = self.ab_product
                 self.assertEqual(line.product_uom_id, dozen)
@@ -120,8 +124,8 @@ class TestPurchaseRequest(TransactionCase):
         purchase, transfer = request.line_ids
         self.assertAlmostEqual(purchase.qty_available_location, 1.5)
         self.assertEqual(transfer.qty_available_location, 25)
-        request.location_id = False
-        self.assertEqual(purchase.qty_available_location, 0)
+        request.location_id = self.ab_warehouse.lot_stock_id
+        self.assertAlmostEqual(purchase.qty_available_location, 25 / 12)
         self.assertEqual(transfer.qty_available_location, 25)
 
     def test_generated_documents_and_closure_use_each_line_uom(self):
@@ -207,7 +211,7 @@ class TestPurchaseRequest(TransactionCase):
                 line.product_id = self.ab_grandchild_product
         self.assertRegex(form.record.name, r"^SC\d{5,}$")
         line = form.record.line_ids
-        domain = safe_eval(line._fields["product_id"].domain, {"category_id": line.category_id.id})
+        domain = safe_eval(line._fields["product_id"].domain, {"allowed_category_ids": line.allowed_category_ids.ids})
         products = self.env["product.product"].search(domain)
         self.assertIn(self.ab_product, products)
         self.assertIn(self.ab_child_product, products)
@@ -240,6 +244,60 @@ class TestPurchaseRequest(TransactionCase):
             request.category_id = self.supplies_category
         with self.assertRaises(ValidationError), self.cr.savepoint():
             request.write({"line_ids": [self._line(self.supplies_product)]})
+
+    def test_category_selector_finds_all_descendants_by_name_and_code(self):
+        self.root_category.name = "TODOS"
+        self.ab_child.name = "ABARROTES"
+        self.ab_grandchild.name = "Abart"
+        self.ab_grandchild_product.write({"name": "Arroz Abart", "default_code": "ABART-001"})
+        deeper = self.env["product.category"].create({"name": "Nivel 5", "parent_id": self.ab_grandchild.id})
+        deepest = self.env["product.category"].create({"name": "Nivel 6", "parent_id": deeper.id})
+        product = self._product("Arroz nivel 6", deepest)
+        form_arch = etree.fromstring(self.env["purchase.request"].get_view(view_type="form")["arch"])
+        domain_expression = form_arch.xpath("//field[@name='line_ids']//field[@name='product_id']")[0].get("domain")
+        request = self.env["purchase.request"].new({"category_id": self.ab_category.id})
+        # Evaluate the actual selector domain even before the request is saved.
+        domain = safe_eval(domain_expression, {"parent": SimpleNamespace(allowed_category_ids=request.allowed_category_ids.ids)})
+        products = self.env["product.product"]
+        self.assertIn(self.ab_product, products.search(domain))
+        self.assertIn(self.ab_grandchild_product.id, dict(products.name_search("Arroz Abart", args=domain)))
+        self.assertIn(self.ab_grandchild_product.id, dict(products.name_search("ABART-001", args=domain)))
+        self.assertIn(product.id, dict(products.name_search("Arroz nivel 6", args=domain)))
+        self.assertNotIn(self.supplies_product, products.search(domain))
+        request.category_id = self.supplies_category
+        domain = safe_eval(domain_expression, {"parent": SimpleNamespace(allowed_category_ids=request.allowed_category_ids.ids)})
+        self.assertIn(self.supplies_product, products.search(domain))
+        self.assertNotIn(product, products.search(domain))
+
+    def test_category_filter_validation_and_ab_routing_do_not_require_parent_path_index(self):
+        self.env.flush_all()
+        # Reproduce an incomplete hierarchy index without changing the real parent.
+        self.cr.execute("UPDATE product_category SET parent_path = NULL WHERE id = %s", [self.ab_grandchild.id])
+        self.ab_grandchild.invalidate_recordset(["parent_path"])
+        self.assertNotIn(self.ab_grandchild, self.env["product.category"].search([
+            ("id", "child_of", self.ab_category.id),
+        ]))
+        request = self._request(category_id=self.ab_category.id, line_ids=[self._line(self.ab_grandchild_product)])
+        line = request.line_ids
+        domain = safe_eval(line._fields["product_id"].domain, {"allowed_category_ids": line.allowed_category_ids.ids})
+        self.assertIn(self.ab_grandchild_product, self.env["product.product"].search(domain))
+        request.action_generate_purchase_orders()
+        self.assertEqual(request.purchase_order_ids.picking_type_id, self.ab_warehouse.in_type_id)
+
+    def test_destination_is_required_for_all_types_creation_and_editing(self):
+        for request_type in ("purchase", "transfer"):
+            values = {"request_type": request_type, "source_location_id": self.ab_warehouse.lot_stock_id.id}
+            with self.assertRaisesRegex(ValidationError, "Ubicación destino"):
+                self._request(location_id=False, line_ids=[self._line(self.ab_product, **values)])
+            request = self._request(line_ids=[self._line(self.ab_product, **values)])
+            with self.assertRaisesRegex(ValidationError, "Ubicación destino"):
+                request.location_id = False
+        with self.assertRaisesRegex(ValidationError, "Ubicación destino"):
+            self.env["purchase.request"].create({"category_id": self.root_category.id})
+        request = self.env["purchase.request"].with_context(
+            default_location_id=self.supplies_warehouse.lot_stock_id.id,
+        ).create({"category_id": self.root_category.id})
+        self.assertEqual(request.location_id, self.supplies_warehouse.lot_stock_id)
 
     def test_mixed_order_routes_parent_and_descendants_and_receipts(self):
         request = self._request(category_id=self.root_category.id, line_ids=[
@@ -356,15 +414,18 @@ class TestPurchaseRequest(TransactionCase):
         self.assertEqual(request.picking_ids.location_dest_id, self.supplies_warehouse.lot_stock_id)
         self.assertEqual(request.picking_ids.picking_type_id, self.ab_warehouse.int_type_id)
 
-    def test_purchase_only_form_can_confirm_and_buy_without_destination(self):
+    def test_purchase_only_form_requires_destination_and_can_buy(self):
+        with self.assertRaises(AssertionError), Form(self.env["purchase.request"]) as form:
+            form.category_id = self.root_category
         with Form(self.env["purchase.request"]) as form:
             form.category_id = self.root_category
+            form.location_id = self.supplies_warehouse.lot_stock_id
             with form.line_ids.new() as line:
                 line.product_id = self.ab_product
                 line.vendor_id = self.vendor
                 line.selected_for_action = True
         request = form.record
-        self.assertFalse(request.location_id)
+        self.assertEqual(request.location_id, self.supplies_warehouse.lot_stock_id)
         self.assertEqual(request.line_ids.qty_available_location, 0)
         request.action_request()
         request.action_confirm()
@@ -372,33 +433,42 @@ class TestPurchaseRequest(TransactionCase):
         request.action_generate_purchase_orders()
         self.assertEqual(request.purchase_order_ids.picking_type_id, self.ab_warehouse.in_type_id)
 
-    def test_mixed_request_can_save_without_destination_but_cannot_confirm_or_transfer(self):
-        request = self._request(location_id=False, line_ids=[
+    def test_legacy_missing_destination_cannot_submit_confirm_or_generate(self):
+        request = self._request(line_ids=[
             self._line(self.ab_product),
             self._line(self.supplies_product, request_type="transfer",
                        source_location_id=self.ab_warehouse.lot_stock_id.id),
         ])
-        request.action_request()
-        with self.assertRaisesRegex(UserError, "Ubicación destino"):
-            request.action_confirm()
-        self.assertEqual(request.state, "requested")
-        with self.assertRaisesRegex(UserError, "Ubicación destino"):
-            request.action_generate_transfers()
+        self.env.flush_all()
+        self.cr.execute("ALTER TABLE purchase_request ALTER COLUMN location_id DROP NOT NULL")
+        self.cr.execute("UPDATE purchase_request SET location_id = NULL WHERE id = %s", [request.id])
+        request.invalidate_recordset(["location_id"])
+        for action in (request.action_request, request.action_confirm,
+                       request.action_generate_purchase_orders, request.action_generate_transfers,
+                       lambda: request.write({"name": "WITHOUT-DESTINATION"})):
+            with self.assertRaisesRegex(ValidationError, "Ubicación destino"):
+                action()
+        self.assertEqual(request.state, "draft")
+        self.assertFalse(request.purchase_order_ids)
         self.assertFalse(request.picking_ids)
         request.location_id = self.supplies_warehouse.lot_stock_id
         request.action_confirm()
         request.action_generate_transfers()
         self.assertEqual(request.picking_ids.location_dest_id, request.location_id)
-        with self.assertRaisesRegex(UserError, "ubicación destino"):
+        with self.assertRaisesRegex(ValidationError, "Ubicación destino"):
             request.location_id = False
         self.assertEqual(len(request.picking_ids), 1)
 
     def test_batch_confirmation_checks_even_unselected_transfer_lines_before_changing_states(self):
-        purchase = self._request(location_id=False, state="requested", line_ids=[self._line(self.ab_product)])
-        transfer = self._request(location_id=False, state="requested", line_ids=[self._line(
+        purchase = self._request(state="requested", line_ids=[self._line(self.ab_product)])
+        transfer = self._request(state="requested", line_ids=[self._line(
             self.ab_product, request_type="transfer", selected_for_action=False, qty_requested=0,
             source_location_id=self.ab_warehouse.lot_stock_id.id,
         )])
+        self.env.flush_all()
+        self.cr.execute("ALTER TABLE purchase_request ALTER COLUMN location_id DROP NOT NULL")
+        self.cr.execute("UPDATE purchase_request SET location_id = NULL WHERE id = %s", [transfer.id])
+        transfer.invalidate_recordset(["location_id"])
         with self.assertRaisesRegex(UserError, "Ubicación destino"):
             (purchase | transfer).action_confirm()
         self.assertEqual(purchase.state, "requested")
@@ -570,7 +640,9 @@ class TestPurchaseRequest(TransactionCase):
         with self.assertRaises(AssertionError), Form(self.env["purchase.request"]) as form:
             form.location_id = self.supplies_warehouse.lot_stock_id
         # Context defaults still work for imports and actions supplying a category.
-        request = self.env["purchase.request"].with_context(default_category_id=self.root_category.id).create({})
+        request = self.env["purchase.request"].with_context(default_category_id=self.root_category.id).create({
+            "location_id": self.supplies_warehouse.lot_stock_id.id,
+        })
         self.assertEqual(request.category_id, self.root_category)
 
     def test_generated_lines_are_locked_and_buttons_cannot_generate_twice(self):
