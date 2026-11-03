@@ -25,13 +25,17 @@ class PurchaseRequest(models.Model):
         default=lambda self: self.env.company,
     )
     location_id = fields.Many2one(
-        "stock.location", string="Ubicación destino",
+        "stock.location", string="Ubicación destino", required=True,
         domain=STOCK_LOCATION_DOMAIN, check_company=True,
-        help="Obligatoria al confirmar solicitudes con traslados y al generarlos. Opcional para compras.",
+        help="Obligatoria en todas las solicitudes, tanto de compra como de traslado.",
     )
     category_id = fields.Many2one(
         "product.category", string="Categoría de productos", required=True,
         help="Permite productos de esta categoría y de todas sus subcategorías.",
+    )
+    allowed_category_ids = fields.Many2many(
+        "product.category", compute="_compute_allowed_category_ids",
+        string="Categorías permitidas",
     )
     line_ids = fields.One2many("purchase.request.line", "request_id", string="Productos")
     state = fields.Selection([
@@ -61,6 +65,10 @@ class PurchaseRequest(models.Model):
     def write(self, vals):
         if "category_id" in vals and not vals["category_id"]:
             raise ValidationError(_("La Categoría de productos es obligatoria."))
+        if "location_id" in vals and not vals["location_id"]:
+            raise ValidationError(_("La Ubicación destino es obligatoria en todas las solicitudes."))
+        if "location_id" not in vals:
+            self._check_destination()
         if {"company_id", "location_id"} & vals.keys():
             self.line_ids._lock_for_processing()
             for request in self:
@@ -80,10 +88,12 @@ class PurchaseRequest(models.Model):
 
     @api.model_create_multi
     def create(self, vals_list):
-        default_category = self.default_get(["category_id"]).get("category_id")
+        defaults = self.default_get(["category_id", "location_id"])
         for vals in vals_list:
-            if not vals.get("category_id", default_category):
+            if not vals.get("category_id", defaults.get("category_id")):
                 raise ValidationError(_("La Categoría de productos es obligatoria."))
+            if not vals.get("location_id", defaults.get("location_id")):
+                raise ValidationError(_("La Ubicación destino es obligatoria en todas las solicitudes."))
             if not vals.get("name") or vals["name"] in ("/", "Nuevo", _("Nuevo")):
                 company = self.env["res.company"].browse(
                     vals.get("company_id") or self.default_get(["company_id"])["company_id"]
@@ -98,14 +108,33 @@ class PurchaseRequest(models.Model):
             raise UserError(_("Configura una secuencia activa con el código purchase.request."))
         return name
 
+    @api.model
+    def _get_category_descendants(self, category):
+        """Follow actual parents at every depth, even if parent_path is stale."""
+        categories = category
+        level = category
+        while level:
+            level = self.env["product.category"].search([
+                ("parent_id", "in", level.ids),
+            ]) - categories
+            categories |= level
+        return categories
+
+    @api.depends("category_id")
+    def _compute_allowed_category_ids(self):
+        categories_by_root = {}
+        for request in self:
+            category = request.category_id
+            if category.id not in categories_by_root:
+                categories_by_root[category.id] = self._get_category_descendants(category)
+            request.allowed_category_ids = categories_by_root[category.id]
+
     @api.constrains("category_id", "line_ids")
     def _check_product_category(self):
         if any(not request.category_id for request in self):
             raise ValidationError(_("La Categoría de productos es obligatoria."))
         for request in self.filtered("category_id"):
-            categories = self.env["product.category"].search([
-                ("id", "child_of", request.category_id.id),
-            ])
+            categories = self._get_category_descendants(request.category_id)
             invalid_lines = request.line_ids.filtered(
                 lambda line: line.product_id and line.product_id.categ_id not in categories
             )
@@ -131,6 +160,7 @@ class PurchaseRequest(models.Model):
         )
 
     def action_request(self):
+        self._check_destination()
         for rec in self:
             if not rec.line_ids:
                 raise UserError(_("Agrega al menos una línea."))
@@ -142,7 +172,7 @@ class PurchaseRequest(models.Model):
 
     def action_confirm(self):
         self._check_product_category()
-        self._check_transfer_destination()
+        self._check_destination()
         for rec in self:
             rec.state = "confirmed"
             rec._notify_group(
@@ -150,12 +180,13 @@ class PurchaseRequest(models.Model):
                 _("Solicitud confirmada (%s). Revisa el tipo de operación de cada línea.") % rec.name,
             )
 
-    def _check_transfer_destination(self):
+    @api.constrains("location_id")
+    def _check_destination(self):
         for request in self:
-            if not request.location_id and any(line.request_type == "transfer" for line in request.line_ids):
-                raise UserError(_(
-                    "La solicitud %s contiene líneas de traslado. Completa el campo Ubicación destino "
-                    "antes de confirmar o generar los traslados.",
+            if not request.location_id:
+                raise ValidationError(_(
+                    "Completa la Ubicación destino de la solicitud %s. Es obligatoria "
+                    "tanto para compras como para traslados.",
                     request.name,
                 ))
 
@@ -203,6 +234,7 @@ class PurchaseRequest(models.Model):
 
     def action_generate_purchase_orders(self):
         self.ensure_one()
+        self._check_destination()
         self = self.with_company(self.company_id)
         self.line_ids._lock_for_processing()
         lines = self.line_ids.filtered(
@@ -222,7 +254,7 @@ class PurchaseRequest(models.Model):
         ab_category = company.purchase_request_ab_category_id
         if not ab_category:
             raise UserError(_("Configura la categoría de A&B en Ajustes > Compras > Solicitudes de compra."))
-        ab_categories = self.env["product.category"].search([("id", "child_of", ab_category.id)])
+        ab_categories = self._get_category_descendants(ab_category)
 
         # A purchase order has one operation type, even when the vendor is shared.
         grouped = defaultdict(list)
@@ -283,7 +315,7 @@ class PurchaseRequest(models.Model):
         self.ensure_one()
         self = self.with_company(self.company_id)
         self.line_ids._lock_for_processing()
-        self._check_transfer_destination()
+        self._check_destination()
         lines = self.line_ids.filtered(
             lambda line: line.request_type == "transfer" and line.selected_for_action
             and line.qty_requested > 0 and not line.is_processed
@@ -364,9 +396,10 @@ class PurchaseRequestLine(models.Model):
     ], string="Tipo", default="purchase", required=True)
     company_id = fields.Many2one(related="request_id.company_id", store=True)
     category_id = fields.Many2one(related="request_id.category_id")
+    allowed_category_ids = fields.Many2many(related="request_id.allowed_category_ids")
     product_id = fields.Many2one(
         "product.product", required=True, check_company=True,
-        domain="[('categ_id', 'child_of', category_id)] if category_id else []",
+        domain="[('categ_id', 'in', allowed_category_ids)]",
     )
     product_uom_id = fields.Many2one(
         "uom.uom", string="Unidad de medida", compute="_compute_product_uom_id",
