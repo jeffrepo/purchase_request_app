@@ -38,6 +38,19 @@ las cantidades de los traslados existentes se convierten de la unidad anterior
 a la de venta para conservar la cantidad física; los documentos ya generados
 conservan sus unidades y cantidades originales.
 
+Desde `18.0.1.5.0`, las líneas de traslado permiten elegir otra unidad de la
+misma categoría. La solicitud conserva esa unidad y el traslado recibe la
+cantidad convertida a la unidad de venta/inventario del producto. Las líneas
+de compra conservan su unidad de compra obligatoria.
+
+Las conversiones utilizan los factores y redondeos configurados en Odoo.
+Para representar **6 onzas como 0.375 libras**, configurar al menos **3 decimales**
+en **Ajustes > Técnico > Estructura de la base de datos > Precisión decimal >
+Product Unit of Measure** (modo desarrollador) y un redondeo de **0.001** o más
+preciso en la unidad **Libras**. Si la precisión disponible cambia la cantidad
+solicitada, se muestra un error antes de generar el traslado. El módulo no
+modifica automáticamente estas configuraciones compartidas de inventario.
+
 Desde `18.0.1.4.0`, las líneas que generan una compra o un traslado quedan
 marcadas como **Procesadas** y bloqueadas. La actualización también bloquea
 las líneas anteriores que coinciden con documentos vinculados, incluidos los
@@ -90,12 +103,12 @@ su flujo de recepción configurado.
 - Cada línea tiene un **Tipo**: **Compra** o **Traslado**. Una solicitud puede
   combinar ambos. El origen es obligatorio para las líneas de traslado, tanto
   en el formulario como al crear o editar por API.
-- **Unidad de medida** se muestra siempre y se determina automáticamente por
-  el tipo de línea y el producto, aunque ambas unidades coincidan. La cantidad
-  solicitada y la existencia se expresan en esa unidad; las compras y movimientos
-  generados utilizan la misma unidad que la línea. Por ejemplo, un producto que
-  se compra por docena y se vende por unidad usa docenas para compras y unidades
-  para traslados.
+- **Unidad de medida** se muestra siempre. En compras utiliza la unidad de compra
+  del producto y no se puede editar. En traslados propone la unidad de venta y
+  permite elegir onzas, kilos u otra unidad de su misma categoría. La cantidad
+  solicitada y la existencia se expresan en la unidad elegida; el movimiento
+  generado convierte la cantidad a la unidad de venta/inventario del producto.
+  Al cambiar el producto o el tipo de línea se propone nuevamente su unidad.
 - **Generar compras** procesa únicamente las líneas de compra seleccionadas con
   cantidad positiva que aún no estén procesadas. Cada línea debe tener proveedor. Se crea una orden por combinación
   de proveedor y tipo de operación; A&B e insumos con operaciones distintas nunca
@@ -154,3 +167,6 @@ su persistencia tras cancelar/eliminar documentos, generación de nuevas líneas
 sin duplicar las anteriores y actualización de líneas históricas.
 También cubren búsquedas por nombre y código en subcategorías profundas,
 jerarquías con un índice desactualizado y destino obligatorio para todos los tipos.
+Las pruebas de unidades cubren selección en el formulario, validación por API,
+conversión de onzas y kilos a libras, existencias, reservas, entregas parciales,
+cierre, copias, bloqueo de unidades procesadas y rechazo de pérdida de precisión.
