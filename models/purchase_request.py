@@ -2,7 +2,7 @@ from collections import defaultdict
 
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError, ValidationError
-from odoo.tools.float_utils import float_compare
+from odoo.tools.float_utils import float_compare, float_round
 
 
 STOCK_LOCATION_DOMAIN = [
@@ -210,9 +210,13 @@ class PurchaseRequest(models.Model):
                 key = (line.request_type, line.product_id, False, False)
                 if line.request_type == "transfer":
                     key = (line.request_type, line.product_id, line.source_location_id.id, request.location_id.id)
-                requested[key] += line.product_uom_id._compute_quantity(
-                    line.qty_requested, line.product_id.uom_id, round=False,
-                )
+                if line.request_type == "transfer" and line.is_processed:
+                    # Sum each generated demand after conversion/rounding, as on its stock move.
+                    requested[key] += line._get_transfer_quantity(check_precision=False)
+                else:
+                    requested[key] += line.product_uom_id._compute_quantity(
+                        line.qty_requested, line.product_id.uom_id, round=False,
+                    )
 
             purchase_lines = request.purchase_order_ids.filtered(
                 lambda order: order.state in ("purchase", "done")
@@ -326,6 +330,7 @@ class PurchaseRequest(models.Model):
                 "Las líneas procesadas no pueden generar otro traslado."
             ))
         self._check_product_category()
+        lines._check_product_uom()
         grouped = defaultdict(list)
         for line in lines:
             source = line.source_location_id
@@ -367,8 +372,8 @@ class PurchaseRequest(models.Model):
                 picking_vals["move_ids_without_package"].append((0, 0, {
                     "name": l.product_id.display_name,
                     "product_id": l.product_id.id,
-                    "product_uom_qty": l.qty_requested,
-                    "product_uom": l.product_uom_id.id,
+                    "product_uom_qty": l._get_transfer_quantity(),
+                    "product_uom": l.product_id.uom_id.id,
                     "location_id": source_loc_id,
                     "location_dest_id": destination_loc_id,
                 }))
@@ -403,9 +408,12 @@ class PurchaseRequestLine(models.Model):
     )
     product_uom_id = fields.Many2one(
         "uom.uom", string="Unidad de medida", compute="_compute_product_uom_id",
-        store=True, readonly=True,
-        help="Unidad de compra para compras y unidad de venta del producto para traslados.",
+        store=True, readonly=False, required=True, precompute=True, copy=True,
+        domain="[('category_id', '=', product_uom_category_id)]",
+        help="En compras se utiliza la unidad de compra. En traslados puedes elegir una unidad "
+             "de la misma categoría; la cantidad se convierte a la unidad del producto al generar el traslado.",
     )
+    product_uom_category_id = fields.Many2one(related="product_id.uom_id.category_id")
     qty_available_location = fields.Float(string="Existencia", compute="_compute_qty_available_location")
     qty_requested = fields.Float(string="Cantidad a solicitar", required=True, default=1.0)
     vendor_id = fields.Many2one(
@@ -430,6 +438,14 @@ class PurchaseRequestLine(models.Model):
             # Also override context defaults, including when duplicating a request.
             vals["is_processed"] = False
         return super().create(vals_list)
+
+    def copy_data(self, default=None):
+        vals_list = super().copy_data(default=default)
+        for vals in vals_list:
+            if vals.get("request_type") == "purchase" and "product_uom_id" not in (default or {}):
+                # A copied purchase uses the current purchase UoM, which may have changed.
+                vals.pop("product_uom_id", None)
+        return vals_list
 
     def _lock_for_processing(self):
         """Serialize generation and edits; Odoo retries concurrent transactions."""
@@ -461,6 +477,17 @@ class PurchaseRequestLine(models.Model):
                         "No puedes modificarla ni cambiar su selección.",
                         product=line.product_id.display_name,
                     ))
+        if "product_uom_id" not in vals and {"product_id", "request_type"} & vals.keys():
+            for line in self:
+                line_vals = dict(vals)
+                product = self.env["product.product"].browse(vals.get("product_id", line.product_id.id))
+                request_type = vals.get("request_type", line.request_type)
+                if product != line.product_id or request_type != line.request_type:
+                    line_vals["product_uom_id"] = (
+                        product.uom_po_id if request_type == "purchase" else product.uom_id
+                    ).id
+                super(PurchaseRequestLine, line).write(line_vals)
+            return True
         return super().write(vals)
 
     @api.ondelete(at_uninstall=False)
@@ -474,9 +501,53 @@ class PurchaseRequestLine(models.Model):
         for line in self:
             if line.is_processed and line.product_uom_id:
                 continue
+            if line.request_type == "purchase":
+                line.product_uom_id = line.product_id.uom_po_id
+            elif not line.product_uom_id or line.product_uom_id.category_id != line.product_id.uom_id.category_id:
+                line.product_uom_id = line.product_id.uom_id
+
+    @api.onchange("product_id", "request_type")
+    def _onchange_default_product_uom_id(self):
+        for line in self.filtered(lambda line: not line.is_processed):
             line.product_uom_id = (
                 line.product_id.uom_po_id if line.request_type == "purchase" else line.product_id.uom_id
             )
+
+    @api.constrains("product_id", "product_uom_id", "request_type")
+    def _check_product_uom(self):
+        for line in self:
+            if not line.product_uom_id or line.product_uom_id.category_id != line.product_id.uom_id.category_id:
+                raise ValidationError(_(
+                    "La unidad de medida debe pertenecer a la misma categoría que la unidad del producto %s.",
+                    line.product_id.display_name,
+                ))
+            if (line.request_type == "purchase" and not line.is_processed
+                    and line.product_uom_id != line.product_id.uom_po_id):
+                raise ValidationError(_("Las líneas de compra deben utilizar la unidad de compra del producto."))
+
+    def _get_transfer_quantity(self, check_precision=True):
+        """Normalize demand to the product UoM without silently losing requested quantities."""
+        self.ensure_one()
+        product_uom = self.product_id.uom_id
+        quantity = self.product_uom_id._compute_quantity(
+            self.qty_requested, product_uom, rounding_method="HALF-UP",
+        )
+        precision = self.env["decimal.precision"].precision_get("Product Unit of Measure")
+        stored_quantity = float_round(quantity, precision_digits=precision)
+        if not check_precision:
+            return stored_quantity
+        quantity_back = product_uom._compute_quantity(stored_quantity, self.product_uom_id, round=False)
+        if (stored_quantity <= 0 or float_compare(quantity, stored_quantity, precision_rounding=product_uom.rounding)
+                or float_compare(quantity_back, self.qty_requested, precision_rounding=self.product_uom_id.rounding)):
+            raise UserError(_(
+                "No se puede convertir %(quantity)s %(unit)s de %(product)s a %(product_unit)s "
+                "sin perder precisión. Revisa el redondeo de %(product_unit)s y los decimales de "
+                "'Product Unit of Measure' en Ajustes técnicos. Por ejemplo, 6 onzas = 0.375 libras "
+                "requiere al menos 3 decimales y un redondeo de libras de 0.001 o más preciso.",
+                quantity=self.qty_requested, unit=self.product_uom_id.display_name,
+                product=self.product_id.display_name, product_unit=product_uom.display_name,
+            ))
+        return stored_quantity
 
     @api.constrains("request_type", "source_location_id")
     def _check_transfer_source(self):

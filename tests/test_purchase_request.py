@@ -153,6 +153,191 @@ class TestPurchaseRequest(TransactionCase):
         request.picking_ids._action_done()
         self.assertEqual(request.state, "closed")
 
+    def _weight_product(self):
+        pound = self.env.ref("uom.product_uom_lb")
+        ounce = self.env.ref("uom.product_uom_oz")
+        self.env.ref("product.decimal_product_uom").digits = 3
+        pound.rounding = 0.001
+        self.ab_product.write({"uom_id": pound.id, "uom_po_id": pound.id, "is_storable": True})
+        return pound, ounce
+
+    def test_transfer_form_selects_compatible_units_and_purchase_stays_fixed(self):
+        pound, ounce = self._weight_product()
+        kilogram = self.env.ref("uom.product_uom_kgm")
+        with Form(self.env["purchase.request"]) as form:
+            form.category_id = self.root_category
+            form.location_id = self.supplies_warehouse.lot_stock_id
+            with form.line_ids.new() as line:
+                line.product_id = self.ab_product
+                with self.assertRaises(AssertionError):
+                    line.product_uom_id = ounce
+                line.request_type = "transfer"
+                line.source_location_id = self.ab_warehouse.lot_stock_id
+                self.assertEqual(line.product_uom_id, pound)
+                line.product_uom_id = kilogram
+                line.product_uom_id = ounce
+                line.qty_requested = 6
+        transfer = form.record.line_ids
+        self.assertEqual(transfer.product_uom_id, ounce)
+        domain = safe_eval(transfer._fields["product_uom_id"].domain, {
+            "product_uom_category_id": transfer.product_uom_category_id.id,
+        })
+        units = self.env["uom.uom"].search(domain)
+        self.assertTrue((pound | ounce | kilogram) <= units)
+        self.assertNotIn(self.env.ref("uom.product_uom_unit"), units)
+        with Form(form.record) as edit:
+            with edit.line_ids.edit(0) as line:
+                line.request_type = "purchase"
+                self.assertEqual(line.product_uom_id, pound)
+                line.request_type = "transfer"
+                line.product_uom_id = ounce
+                line.product_id = self.supplies_product
+                self.assertEqual(line.product_uom_id, self.supplies_product.uom_id)
+
+    def test_transfer_converts_six_ounces_to_pounds_and_preserves_stock_and_locks(self):
+        pound, ounce = self._weight_product()
+        source = self.ab_warehouse.lot_stock_id
+        self.env["stock.quant"]._update_available_quantity(self.ab_product, source, 2)
+        request = self._request(state="confirmed", line_ids=[self._line(
+            self.ab_product, request_type="transfer", source_location_id=source.id,
+            product_uom_id=ounce.id, qty_requested=6,
+        )])
+        line = request.line_ids
+        self.assertAlmostEqual(line.qty_available_location, 32, places=3)
+        line.selected_for_action = False
+        line.selected_for_action = True
+        self.assertEqual(line.product_uom_id, ounce)
+        request.action_generate_transfers()
+        picking = request.picking_ids
+        move = picking.move_ids
+        self.env.flush_all()
+        move.invalidate_recordset()
+        self.assertEqual(move.product_uom, pound)
+        self.assertEqual(move.product_uom_qty, 0.375)
+        self.assertEqual(move.product_qty, 0.375)
+        self.assertEqual(line.product_uom_id, ounce)
+        self.assertEqual(line.qty_requested, 6)
+        with self.assertRaisesRegex(UserError, "ya generó"), self.cr.savepoint():
+            line.product_uom_id = pound
+        with Form(request) as form:
+            with form.line_ids.edit(0) as edit:
+                with self.assertRaises(AssertionError):
+                    edit.product_uom_id = pound
+        picking.action_confirm()
+        picking.action_assign()
+        self.assertEqual(move.quantity, 0.375)
+        move.picked = True
+        picking._action_done()
+        self.assertEqual(request.state, "closed")
+        self.assertEqual(self.env["stock.quant"]._get_available_quantity(self.ab_product, source), 1.625)
+        self.assertEqual(self.env["stock.quant"]._get_available_quantity(self.ab_product, request.location_id), 0.375)
+        copy = line.copy({"request_id": self._request().id})
+        self.assertEqual(copy.product_uom_id, ounce)
+        self.assertEqual(copy.qty_requested, 6)
+        self.assertFalse(copy.is_processed)
+
+    def test_selected_transfer_uom_survives_purchase_uom_configuration_changes(self):
+        pound, ounce = self._weight_product()
+        request = self._request(line_ids=[
+            self._line(self.ab_product),
+            self._line(self.ab_product, request_type="transfer", product_uom_id=ounce.id,
+                       source_location_id=self.ab_warehouse.lot_stock_id.id),
+        ])
+        purchase, transfer = request.line_ids
+        self.ab_product.uom_po_id = self.env.ref("uom.product_uom_kgm")
+        self.assertEqual(purchase.product_uom_id, self.ab_product.uom_po_id)
+        self.assertEqual(transfer.product_uom_id, ounce)
+        transfer.write({"product_id": self.ab_product.id, "request_type": "transfer"})
+        self.assertEqual(transfer.product_uom_id, ounce)
+        transfer.request_type = "purchase"
+        self.assertEqual(transfer.product_uom_id, self.ab_product.uom_po_id)
+        transfer.request_type = "transfer"
+        self.assertEqual(transfer.product_uom_id, pound)
+        request.action_generate_purchase_orders()
+        self.ab_product.uom_po_id = pound
+        copy = purchase.copy({"request_id": self._request().id})
+        self.assertEqual(copy.product_uom_id, pound)
+
+    def test_transfer_converts_kilograms_and_closes_only_after_backorder(self):
+        pound, ounce = self._weight_product()
+        kilogram = self.env.ref("uom.product_uom_kgm")
+        request = self._request(state="confirmed", line_ids=[self._line(
+            self.ab_product, request_type="transfer", source_location_id=self.ab_warehouse.lot_stock_id.id,
+            product_uom_id=kilogram.id, qty_requested=2,
+        )])
+        request.action_generate_transfers()
+        picking = request.picking_ids
+        picking.action_confirm()
+        self.assertEqual(picking.move_ids.product_uom, pound)
+        self.assertEqual(picking.move_ids.product_uom_qty, 4.409)
+        picking.move_ids.quantity = 2
+        picking.move_ids.picked = True
+        picking._action_done()
+        self.assertEqual(request.state, "confirmed")
+        backorder = request.picking_ids - picking
+        self.assertEqual(backorder.move_ids.product_uom_qty, 2.409)
+        backorder.move_ids.quantity = 2.409
+        backorder.move_ids.picked = True
+        backorder._action_done()
+        self.assertEqual(request.state, "closed")
+
+    def test_uom_validation_applies_to_imports_and_api(self):
+        pound, ounce = self._weight_product()
+        unit = self.env.ref("uom.product_uom_unit")
+        for values, message in (
+            ({"request_type": "transfer", "product_uom_id": unit.id}, "misma categoría"),
+            ({"product_uom_id": ounce.id}, "unidad de compra"),
+        ):
+            with self.assertRaisesRegex(ValidationError, message), self.cr.savepoint():
+                self._request(line_ids=[self._line(
+                    self.ab_product, source_location_id=self.ab_warehouse.lot_stock_id.id, **values,
+                )])
+        request = self._request(line_ids=[self._line(self.ab_product)])
+        with self.assertRaisesRegex(ValidationError, "unidad de compra"), self.cr.savepoint():
+            request.line_ids.product_uom_id = ounce
+        request.line_ids.write({"request_type": "transfer", "source_location_id": self.ab_warehouse.lot_stock_id.id})
+        with self.assertRaisesRegex(ValidationError, "misma categoría"), self.cr.savepoint():
+            request.line_ids.product_uom_id = unit
+        request.line_ids.product_uom_id = ounce
+        request.line_ids.product_id = self.supplies_product
+        self.assertEqual(request.line_ids.product_uom_id, unit)
+
+    def test_multiple_converted_lines_close_without_accumulated_rounding_residue(self):
+        pound, ounce = self._weight_product()
+        kilogram = self.env.ref("uom.product_uom_kgm")
+        request = self._request(state="confirmed", line_ids=[
+            self._line(self.ab_product, request_type="transfer", qty_requested=quantity,
+                       source_location_id=self.ab_warehouse.lot_stock_id.id, product_uom_id=unit.id)
+            for unit, quantity in ((kilogram, 2), (kilogram, 2), (kilogram, 2), (ounce, 6))
+        ])
+        request.action_generate_transfers()
+        picking = request.picking_ids
+        self.assertEqual(picking.move_ids.mapped("product_uom_qty"), [4.409, 4.409, 4.409, 0.375])
+        picking.action_confirm()
+        for move in picking.move_ids:
+            move.quantity = move.product_uom_qty
+            move.picked = True
+        picking._action_done()
+        self.assertEqual(request.state, "closed")
+
+    def test_transfer_rejects_loss_of_precision_before_generating_documents(self):
+        pound, ounce = self._weight_product()
+        request = self._request(line_ids=[self._line(
+            self.ab_product, request_type="transfer", source_location_id=self.ab_warehouse.lot_stock_id.id,
+            product_uom_id=ounce.id, qty_requested=6,
+        )])
+        # Both the UoM rounding and the stock quantity field precision must support 0.375.
+        for rounding, digits in ((0.01, 2), (0.001, 2), (0.01, 3)):
+            pound.rounding = rounding
+            self.env.ref("product.decimal_product_uom").digits = digits
+            with self.assertRaisesRegex(UserError, "sin perder precisión"), self.cr.savepoint():
+                request.action_generate_transfers()
+            self.assertFalse(request.picking_ids)
+            self.assertFalse(request.line_ids.is_processed)
+        pound.rounding = 0.001
+        request.action_generate_transfers()
+        self.assertEqual(request.picking_ids.move_ids.product_uom_qty, 0.375)
+
     def test_uom_migration_preserves_old_transfer_quantities_and_is_idempotent(self):
         unit = self.env.ref("uom.product_uom_unit")
         dozen = self.env.ref("uom.product_uom_dozen")

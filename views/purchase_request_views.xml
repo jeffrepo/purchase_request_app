@@ -58,7 +58,9 @@
                                            options="{'no_create': True}"/>
                                     <field name="qty_available_location" readonly="1"/>
                                     <field name="qty_requested" readonly="is_processed"/>
-                                    <field name="product_uom_id" readonly="1"/>
+                                    <field name="product_uom_category_id" column_invisible="True"/>
+                                    <field name="product_uom_id" readonly="is_processed or request_type != 'transfer'"
+                                           options="{'no_create': True}"/>
                                     <field name="vendor_id" readonly="is_processed" invisible="request_type != 'purchase'"/>
                                     <field name="source_location_id" readonly="is_processed" invisible="request_type != 'transfer'" required="request_type == 'transfer'" options="{'no_create': True}"/>
                                 </list>
