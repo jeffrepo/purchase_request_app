@@ -91,6 +91,14 @@ su flujo de recepción configurado.
 
 ## Uso
 
+Desde `18.0.1.6.0`, el precio inicial de las compras convierte el costo de inventario
+a la unidad de compra y a la moneda del proveedor en la fecha de la orden. Aplica
+los impuestos de compra y la posición fiscal, incluyendo en el precio los impuestos
+configurados como incluidos. Conserva el descuento inicial en cero. El precio
+sigue siendo una propuesta basada en costo; Compras puede ajustarlo a la cotización.
+El método `_prepare_purchase_order_line_values(order)` permite que otros addons
+agreguen la referencia exacta a la línea de solicitud sin duplicar la generación.
+
 - **Ubicación destino** y **Ubicación origen** muestran únicamente ubicaciones
   internas cuya ruta termina en `/Stock` (sin distinguir mayúsculas). Se muestra
   la ruta completa, por ejemplo `A/Stock`, y se excluyen las ubicaciones padre y
