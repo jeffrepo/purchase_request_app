@@ -79,6 +79,7 @@ class TestPurchaseRequest(TransactionCase):
         purchase, transfer = request.line_ids
         self.assertEqual(purchase.product_uom_id, dozen)
         self.assertEqual(transfer.product_uom_id, unit)
+
         purchase.write({"request_type": "transfer", "source_location_id": self.ab_warehouse.lot_stock_id.id})
         self.assertEqual(purchase.product_uom_id, unit)
         purchase.request_type = "purchase"
@@ -89,6 +90,36 @@ class TestPurchaseRequest(TransactionCase):
         self.ab_product.uom_po_id = unit
         self.assertEqual(purchase.product_uom_id, unit)
         self.assertEqual(transfer.product_uom_id, unit)
+
+    def test_generated_price_converts_cost_to_purchase_unit_and_included_tax(self):
+        self.ab_product.uom_po_id = self.env.ref("uom.product_uom_dozen")
+        tax = self.env["account.tax"].create({
+            "name": "IVA incluido QA", "amount": 12, "type_tax_use": "purchase",
+            "company_id": self.company.id, "price_include_override": "tax_included",
+        })
+        self.ab_product.supplier_taxes_id = tax
+        request = self._request(line_ids=[self._line(self.ab_product)])
+        request.action_generate_purchase_orders()
+        line = request.purchase_order_ids.order_line
+        self.assertAlmostEqual(line.price_unit, 134.4)
+        self.assertEqual(line.discount, 0)
+        self.assertEqual(line.taxes_id, tax)
+        self.assertAlmostEqual(line.price_subtotal, 240)
+
+    def test_generated_price_converts_company_cost_to_vendor_currency(self):
+        currency = self.env["res.currency"].create({"name": "PQA", "symbol": "P", "rounding": 0.01})
+        self.env["res.currency.rate"].create({
+            "currency_id": currency.id, "company_id": self.company.id,
+            "name": "2000-01-01", "rate": 2,
+        })
+        self.vendor.property_purchase_currency_id = currency
+        self.ab_product.supplier_taxes_id = False
+        request = self._request(line_ids=[self._line(self.ab_product)])
+        request.action_generate_purchase_orders()
+        order = request.purchase_order_ids
+        self.assertEqual(order.currency_id, currency)
+        expected = self.company.currency_id._convert(10, currency, self.company, order.date_order.date(), round=False)
+        self.assertAlmostEqual(order.order_line.price_unit, expected)
 
     def test_form_always_displays_uom_and_changes_it_with_line_type(self):
         unit = self.env.ref("uom.product_uom_unit")

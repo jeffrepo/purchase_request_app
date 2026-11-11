@@ -293,17 +293,14 @@ class PurchaseRequest(models.Model):
                 "picking_type_id": picking_type_id,
                 "origin": self.name,
                 "purchase_request_id": self.id,
+                "date_order": fields.Datetime.now(),
                 "order_line": [],
             }
-            for l in lines:
-                vals["order_line"].append((0, 0, {
-                    "name": l.product_id.display_name,
-                    "product_id": l.product_id.id,
-                    "product_qty": l.qty_requested,
-                    "product_uom": l.product_uom_id.id,
-                    "price_unit": l.product_id.standard_price,
-                    "date_planned": fields.Datetime.now(),
-                }))
+            order = po_model.new(vals)
+            vals["currency_id"] = order.currency_id.id
+            vals["fiscal_position_id"] = order.fiscal_position_id.id
+            for line in lines:
+                vals["order_line"].append((0, 0, line._prepare_purchase_order_line_values(order)))
             po = po_model.create(vals)
             created_pos |= po
             self.env["purchase.request.line"].browse([line.id for line in lines])._mark_processed()
@@ -429,6 +426,37 @@ class PurchaseRequestLine(models.Model):
         string="Procesada", readonly=True, copy=False, default=False,
         help="La línea ya generó una compra o un traslado y no puede modificarse ni reutilizarse.",
     )
+
+    def _prepare_purchase_order_line_values(self, order):
+        """Prepare a purchase-unit price in the order currency, including mapped taxes.
+
+        The initial quotation uses inventory cost as before; supplier negotiation
+        can change it afterwards. This hook also lets extensions retain lineage.
+        """
+        self.ensure_one()
+        product = self.product_id.with_company(order.company_id)
+        taxes = order.fiscal_position_id.map_tax(
+            product.supplier_taxes_id._filter_taxes_by_company(order.company_id)
+        )
+        cost = product.uom_id._compute_price(product.standard_price, self.product_uom_id)
+        cost = order.company_id.currency_id._convert(
+            cost, order.currency_id, order.company_id,
+            fields.Date.to_date(order.date_order), round=False,
+        )
+        price = self.env["account.tax"]._adapt_price_unit_to_another_taxes(
+            cost, product, self.env["account.tax"], taxes,
+            product_uom=self.product_uom_id,
+        )
+        return {
+            "name": product.display_name,
+            "product_id": product.id,
+            "product_qty": self.qty_requested,
+            "product_uom": self.product_uom_id.id,
+            "price_unit": price,
+            "discount": 0,
+            "taxes_id": [(6, 0, taxes.ids)],
+            "date_planned": order.date_order,
+        }
 
     @api.model_create_multi
     def create(self, vals_list):
